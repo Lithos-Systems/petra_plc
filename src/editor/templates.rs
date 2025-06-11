@@ -41,8 +41,8 @@ pub struct PlcNodeTemplate {
 }
 
 impl PlcNodeTemplate {
-    pub fn all_templates() -> Vec<Self> {
-        vec![
+    pub fn all_templates() -> PlcNodeTemplates {
+        PlcNodeTemplates(vec![
             // Logic
             Self {
                 name: "AND".to_string(),
@@ -99,12 +99,48 @@ impl PlcNodeTemplate {
     }
 }
 
-// Allow Vec<PlcNodeTemplate> to be passed directly to graph editor APIs
-impl egui_node_graph::NodeTemplateIter for Vec<PlcNodeTemplate> {
+
+/// Container type for passing node templates to the graph editor APIs.
+#[derive(Clone, Debug)]
+pub struct PlcNodeTemplates(pub Vec<PlcNodeTemplate>);
+
+impl From<Vec<PlcNodeTemplate>> for PlcNodeTemplates {
+    fn from(v: Vec<PlcNodeTemplate>) -> Self {
+        PlcNodeTemplates(v)
+    }
+}
+
+impl std::ops::Deref for PlcNodeTemplates {
+    type Target = [PlcNodeTemplate];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl IntoIterator for PlcNodeTemplates {
+    type Item = PlcNodeTemplate;
+    type IntoIter = std::vec::IntoIter<PlcNodeTemplate>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a PlcNodeTemplates {
+    type Item = &'a PlcNodeTemplate;
+    type IntoIter = std::slice::Iter<'a, PlcNodeTemplate>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl egui_node_graph::NodeTemplateIter for PlcNodeTemplates {
     type Item = PlcNodeTemplate;
 
     fn all_kinds(self) -> Vec<Self::Item> {
-        self
+        self.0
     }
 }
 
