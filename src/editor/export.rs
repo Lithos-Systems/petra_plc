@@ -42,6 +42,14 @@ impl YamlExporter {
 
             // Determine signal type from output
             let output = self.graph.get_output(output_id);
+
+        for (_input_id, output_id) in &self.graph.connections {
+            let signal_name = self.generate_signal_name("signal");
+            signal_map.insert(*output_id, signal_name.clone());
+
+            // Determine signal type from output
+            let output = self.graph.get_output(*output_id);
+
             let signal_type = match output.typ {
                 PlcDataType::Bool => "bool",
                 PlcDataType::Int => "int",
@@ -110,7 +118,11 @@ impl YamlExporter {
         
         // Map inputs
         for (param_name, input_id) in &node.inputs {
+
             if let Some(output_id) = self.graph.connections.get(*input_id) {
+
+
+
                 if let Some(signal_name) = signal_map.get(output_id) {
                     inputs.insert(param_name.clone(), signal_name.clone());
                 }
