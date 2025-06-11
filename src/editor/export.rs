@@ -33,7 +33,7 @@ impl YamlExporter {
             self.graph
                 .connections
                 .iter()
-                .map(|(&i, &o)| (i, o))
+                .map(|(i, o)| (i.clone(), o.clone()))
                 .collect();
         for (_input_id, output_id) in connection_list {
             let signal_name = self.generate_signal_name("signal");
