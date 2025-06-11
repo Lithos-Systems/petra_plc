@@ -242,7 +242,7 @@ impl eframe::App for PlcEditorApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let graph_response = self.state.draw_graph_editor(
                 ui,
-                egui_node_graph::AllNodeTemplates(PlcNodeTemplate::all_templates()),
+                PlcNodeTemplate::all_templates(),
                 &mut self.user_state,
             );
             
