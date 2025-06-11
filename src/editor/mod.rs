@@ -7,4 +7,4 @@ mod export;
 pub use app::PlcEditorApp;
 pub use node_types::{PlcDataType, PlcValueType, PlcNodeData};
 pub use graph_state::{PlcGraphState, PlcEditorState, PlcNodeResponse};
-pub use templates::PlcNodeTemplate;
+pub use templates::{PlcNodeTemplate, PlcNodeTemplates};
