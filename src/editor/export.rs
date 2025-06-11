@@ -121,7 +121,7 @@ impl YamlExporter {
 
             if let Some(output_id) = self.graph.connections.get(*input_id) {
 
-            if let Some(output_id) = self.graph.connections.get(input_id) {
+
 
                 if let Some(signal_name) = signal_map.get(output_id) {
                     inputs.insert(param_name.clone(), signal_name.clone());
@@ -217,3 +217,5 @@ impl YamlExporter {
         })
     }
 }
+
+// End of YamlExporter implementation
