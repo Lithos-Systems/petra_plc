@@ -99,6 +99,15 @@ impl PlcNodeTemplate {
     }
 }
 
+// Allow Vec<PlcNodeTemplate> to be passed directly to graph editor APIs
+impl egui_node_graph::NodeTemplateIter for Vec<PlcNodeTemplate> {
+    type Item = PlcNodeTemplate;
+
+    fn all_kinds(self) -> Vec<Self::Item> {
+        self
+    }
+}
+
 impl NodeTemplateTrait for PlcNodeTemplate {
     type NodeData = PlcNodeData;
     type DataType = PlcDataType;
