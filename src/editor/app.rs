@@ -241,7 +241,9 @@ impl eframe::App for PlcEditorApp {
         // Central panel with node graph
         egui::CentralPanel::default().show(ctx, |ui| {
             let templates = PlcNodeTemplate::all_templates();
-            let graph_response = self.state.draw_graph_editor(ui, templates, &mut self.user_state);
+            let graph_response =
+                self.state
+                    .draw_graph_editor(ui, templates.iter().cloned(), &mut self.user_state);
             
             // Handle graph responses
             for response in graph_response.node_responses {
