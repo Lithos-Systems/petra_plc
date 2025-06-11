@@ -1,6 +1,6 @@
 use super::{PlcNodeData, PlcDataType};
 use crate::blocks::BlockConfig;
-use egui_node_graph::{NodeId, OutputId};
+use egui_node_graph::{NodeId, OutputId, InputId};
 use std::collections::HashMap;
 
 pub type PlcGraph = egui_node_graph::Graph<PlcNodeData, PlcDataType, super::PlcValueType>;
@@ -29,7 +29,9 @@ impl YamlExporter {
         let mut signal_map: HashMap<OutputId, String> = HashMap::new();
 
         // First pass: create signals for all connections
-        for (_input_id, output_id) in &self.graph.connections {
+        let connection_list: Vec<(InputId, OutputId)> =
+            self.graph.connections.iter().map(|(i, o)| (*i, *o)).collect();
+        for (_input_id, output_id) in connection_list {
             let signal_name = self.generate_signal_name("signal");
             signal_map.insert(*output_id, signal_name.clone());
 
@@ -104,7 +106,7 @@ impl YamlExporter {
         
         // Map inputs
         for (param_name, input_id) in &node.inputs {
-            if let Some(output_id) = self.graph.connections.get(input_id) {
+            if let Some(output_id) = self.graph.connections.get(*input_id) {
                 if let Some(signal_name) = signal_map.get(output_id) {
                     inputs.insert(param_name.clone(), signal_name.clone());
                 }
