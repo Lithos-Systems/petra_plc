@@ -37,10 +37,10 @@ impl YamlExporter {
                 .collect();
         for (_input_id, output_id) in connection_list {
             let signal_name = self.generate_signal_name("signal");
-            signal_map.insert(*output_id, signal_name.clone());
+            signal_map.insert(output_id, signal_name.clone());
 
             // Determine signal type from output
-            let output = self.graph.get_output(*output_id);
+            let output = self.graph.get_output(output_id);
 
             let signal_type = match output.typ {
                 PlcDataType::Bool => "bool",
