@@ -242,7 +242,7 @@ impl eframe::App for PlcEditorApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let graph_response = self.state.draw_graph_editor(
                 ui,
-                AllNodeTemplates(PlcNodeTemplate::all_templates()),
+                PlcNodeTemplate::all_templates(),
                 &mut self.user_state,
             );
             
@@ -292,7 +292,7 @@ impl eframe::App for PlcEditorApp {
                                     if self.node_finder_search.is_empty() || 
                                        template.name.to_lowercase().contains(&self.node_finder_search.to_lowercase()) {
                                         if ui.button(&template.name).clicked() {
-                                            let graph = self.state.graph_mut();
+                                            let graph = &mut self.state.graph;
                                             let node_id = graph.add_node(
                                                 template.name.clone(),
                                                 template.user_data(&mut self.user_state),
@@ -302,7 +302,7 @@ impl eframe::App for PlcEditorApp {
                                             );
                                             
                                             // Position at center of viewport
-                                            let center = ctx.screen_rect().center();
+                                            let center = ctx.available_rect().center();
                                             self.state.node_positions.insert(node_id, center);
                                             self.modified = true;
                                             self.show_node_finder = false;
