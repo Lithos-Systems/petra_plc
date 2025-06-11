@@ -1,6 +1,6 @@
 use super::{PlcNodeData, PlcDataType};
 use crate::blocks::BlockConfig;
-use egui_node_graph::{NodeId, OutputId, InputId};
+use egui_node_graph::{NodeId, OutputId};
 use std::collections::HashMap;
 
 pub type PlcGraph = egui_node_graph::Graph<PlcNodeData, PlcDataType, super::PlcValueType>;
@@ -27,14 +27,21 @@ impl YamlExporter {
         let mut signals = Vec::new();
         let mut blocks = Vec::new();
         let mut signal_map: HashMap<OutputId, String> = HashMap::new();
-        
+
         // First pass: create signals for all connections
-        for (_conn_id, connection) in &self.graph.connections {
+        let connections: Vec<_> = self
+            .graph
+            .connections
+            .iter()
+            .map(|(input, output)| (*input, *output))
+            .collect();
+
+        for (_input_id, output_id) in connections {
             let signal_name = self.generate_signal_name("signal");
-            signal_map.insert(connection.output, signal_name.clone());
-            
+            signal_map.insert(output_id, signal_name.clone());
+
             // Determine signal type from output
-            let output = self.graph.get_output(connection.output);
+            let output = self.graph.get_output(output_id);
             let signal_type = match output.typ {
                 PlcDataType::Bool => "bool",
                 PlcDataType::Int => "int",
@@ -103,9 +110,8 @@ impl YamlExporter {
         
         // Map inputs
         for (param_name, input_id) in &node.inputs {
-            if let Some(connection) = self.graph.connections.iter()
-                .find(|(_, conn)| conn.input == *input_id) {
-                if let Some(signal_name) = signal_map.get(&connection.1.output) {
+            if let Some(output_id) = self.graph.connections.get(*input_id) {
+                if let Some(signal_name) = signal_map.get(output_id) {
                     inputs.insert(param_name.clone(), signal_name.clone());
                 }
             }
@@ -199,3 +205,5 @@ impl YamlExporter {
         })
     }
 }
+
+// End of YamlExporter implementation
