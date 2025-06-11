@@ -95,7 +95,7 @@ impl PlcNodeTemplate {
             },
             
             // Add more templates as needed...
-        ]
+        ])
     }
 }
 
