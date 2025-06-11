@@ -30,7 +30,11 @@ impl YamlExporter {
 
         // First pass: create signals for all connections
         let connection_list: Vec<(InputId, OutputId)> =
-            self.graph.connections.iter().map(|(i, o)| (*i, *o)).collect();
+            self.graph
+                .connections
+                .iter()
+                .map(|(&i, &o)| (i, o))
+                .collect();
         for (_input_id, output_id) in connection_list {
             let signal_name = self.generate_signal_name("signal");
             signal_map.insert(*output_id, signal_name.clone());
