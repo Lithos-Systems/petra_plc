@@ -1,0 +1,48 @@
+[package]
+name = "soft-plc"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["editor"]
+editor = ["dep:egui", "dep:eframe", "dep:egui_node_graph", "dep:rfd"]
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dashmap = "6.0"
+
+# GUI dependencies - matching versions for egui_node_graph 0.4
+egui = { version = "0.19", optional = true }
+eframe = { version = "0.19", optional = true }
+egui_node_graph = { version = "0.4", optional = true }
+rfd = { version = "0.12", optional = true }
+
+# For enum iteration
+strum = { version = "0.25", features = ["derive"] }
+strum_macros = "0.25"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bin]]
+name = "test_runner"
+path = "src/bin/test_runner.rs"
+
+[[bin]]
+name = "live_test"
+path = "src/bin/live_test.rs"
+
+[[bin]]
+name = "plc_editor"
+path = "src/bin/plc_editor.rs"
+required-features = ["editor"]
+
+[[example]]
+name = "pump_monitor"
+path = "src/examples/pump_monitor.rs"

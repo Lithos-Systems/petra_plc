@@ -1,0 +1,5254 @@
+===== ./Cargo.toml =====
+[package]
+name = "soft-plc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dashmap = "6.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+# Comment out the benchmark section for now
+# [[bench]]
+# name = "scan_benchmark"
+# harness = false
+
+[[bin]]
+name = "test_runner"
+path = "src/bin/test_runner.rs"
+
+[[bin]]
+name = "live_test"
+path = "src/bin/live_test.rs"
+
+[[example]]
+name = "pump_monitor"
+path = "src/examples/pump_monitor.rs"
+===== ./benches/scan_benchmark.rs =====
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+fn dummy_benchmark(c: &mut Criterion) {
+    c.bench_function("dummy", |b| {
+        b.iter(|| {
+            black_box(1 + 1);
+        })
+    });
+}
+
+criterion_group!(benches, dummy_benchmark);
+criterion_main!(benches);
+===== ./petra/Cargo.toml =====
+[package]
+name = "soft-plc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dashmap = "6.0"
+
+[dev-dependencies]
+criterion = "0.5"
+
+# Comment out the benchmark section for now
+# [[bench]]
+# name = "scan_benchmark"
+# harness = false
+
+[[bin]]
+name = "test_runner"
+path = "src/bin/test_runner.rs"
+
+[[bin]]
+name = "live_test"
+path = "src/bin/live_test.rs"
+
+[[example]]
+name = "pump_monitor"
+path = "src/examples/pump_monitor.rs"
+===== ./petra/benches/scan_benchmark.rs =====
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+fn dummy_benchmark(c: &mut Criterion) {
+    c.bench_function("dummy", |b| {
+        b.iter(|| {
+            black_box(1 + 1);
+        })
+    });
+}
+
+criterion_group!(benches, dummy_benchmark);
+criterion_main!(benches);
+===== ./petra/tests/pump_alternation_test.rs =====
+use soft_plc::{
+    signal::{SignalBus, SignalValue},
+    engine::ScanEngine,
+    Result,
+};
+use std::time::Duration;
+use tokio::time::sleep;
+
+#[tokio::test]
+async fn test_pump_alternation() -> Result<()> {
+    // Load the pump alternation configuration
+    let yaml_config = include_str!("../config/pump_alternation.yaml");
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml_config)?;
+    let mut engine = ScanEngine::new(config)?;
+    
+    let bus = engine.signal_bus();
+    
+    // Helper function to run one scan
+    async fn run_scan(engine: &mut ScanEngine) {
+        // Simulate scan execution
+        for block in &mut engine.blocks {
+            let _ = block.execute(engine.signal_bus());
+        }
+    }
+    
+    // Initial state - pressure is OK (55.0)
+    run_scan(&mut engine).await;
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    
+    println!("Initial state - all pumps off, index=0");
+    
+    // Simulate pressure drop below start setpoint
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await; // Need two scans for edge detection
+    
+    // Pump 1 should start (index 0)
+    assert_eq!(bus.get_bool("pump1_run")?, true);
+    assert_eq!(bus.get_bool("pump2_run")?, false);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("Low pressure detected - Pump 1 started");
+    
+    // Simulate pressure recovery
+    bus.set("pressure", SignalValue::Float(65.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // All pumps should stop
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    println!("Pressure recovered - Pump 1 stopped");
+    
+    // Second pressure drop - should start pump 2
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    assert_eq!(bus.get_bool("pump2_run")?, true);
+    assert_eq!(bus.get_int("pump_index")?, 1);
+    println!("Second low pressure - Pump 2 started");
+    
+    // Recover pressure
+    bus.set("pressure", SignalValue::Float(65.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // Test cycling through all pumps
+    for expected_index in 2..5 {
+        bus.set("pressure", SignalValue::Float(45.0))?;
+        run_scan(&mut engine).await;
+        run_scan(&mut engine).await;
+        
+        assert_eq!(bus.get_int("pump_index")?, expected_index);
+        println!("Pump {} started (index {})", expected_index + 1, expected_index);
+        
+        bus.set("pressure", SignalValue::Float(65.0))?;
+        run_scan(&mut engine).await;
+        run_scan(&mut engine).await;
+    }
+    
+    // Next cycle should wrap back to pump 1
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_bool("pump1_run")?, true);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("Wrapped back to Pump 1");
+    
+    // Test reset functionality
+    bus.set("system_reset", SignalValue::Bool(true))?;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("System reset - index back to 0");
+    
+    // Test manual override
+    bus.set("manual_override", SignalValue::Bool(true))?;
+    bus.set("system_reset", SignalValue::Bool(false))?;
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // No pumps should run in manual mode
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    println!("Manual override active - no auto pump control");
+    
+    Ok(())
+}
+===== ./petra/config/advanced_example.yaml =====
+signals:
+  # Inputs
+  - name: "system_start"
+    type: "bool"
+    initial: false
+  - name: "system_stop"
+    type: "bool"
+    initial: false
+  - name: "emergency_stop"
+    type: "bool"
+    initial: false
+  - name: "part_detected"
+    type: "bool"
+    initial: false
+  - name: "conveyor_speed_setpoint"
+    type: "int"
+    initial: 50
+    
+  # Outputs
+  - name: "conveyor_run"
+    type: "bool"
+    initial: false
+  - name: "alarm_active"
+    type: "bool"
+    initial: false
+  - name: "part_count"
+    type: "int"
+    initial: 0
+  - name: "batch_complete"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "system_enabled"
+    type: "bool"
+    initial: false
+  - name: "start_pulse"
+    type: "bool"
+    initial: false
+  - name: "part_edge"
+    type: "bool"
+    initial: false
+  - name: "alarm_timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  # System control logic
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "system_start"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "system_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "system_stop"
+    outputs:
+      q: "system_enabled"
+      
+  - name: "emergency_check"
+    type: "NOT"
+    inputs:
+      in: "emergency_stop"
+    outputs:
+      out: "no_emergency"
+      
+  - name: "conveyor_control"
+    type: "AND"
+    inputs:
+      in1: "system_enabled"
+      in2: "no_emergency"
+    outputs:
+      out: "conveyor_run"
+      
+  # Part counting
+  - name: "part_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "part_detected"
+    outputs:
+      q: "part_edge"
+      
+  - name: "part_counter"
+    type: "COUNTER"
+    inputs:
+      cu: "part_edge"
+      cd: "never_true"
+      r: "batch_complete"
+    outputs:
+      cv: "part_count"
+      q: "batch_complete"
+    params:
+      preset: 100
+      
+  # Alarm logic
+  - name: "alarm_condition"
+    type: "AND"
+    inputs:
+      in1: "emergency_stop"
+      in2: "system_enabled"
+    outputs:
+      out: "alarm_trigger"
+      
+  - name: "alarm_timer"
+    type: "TP"
+    inputs:
+      in: "alarm_trigger"
+    outputs:
+      q: "alarm_active"
+    params:
+      preset_ms: 500
+      
+  # Speed monitoring
+  - name: "speed_limit_check"
+    type: "GT"
+    inputs:
+      in1: "conveyor_speed_setpoint"
+      in2: "max_speed"
+    outputs:
+      out: "speed_too_high"
+      
+  - name: "speed_alarm"
+    type: "OR"
+    inputs:
+      in1: "alarm_active"
+      in2: "speed_too_high"
+    outputs:
+      out: "any_alarm"
+
+# Initialize some constants
+  - name: "const_max_speed"
+    type: "CONST"
+    outputs:
+      out: "max_speed"
+    params:
+      value: 100
+      
+  - name: "const_false"
+    type: "CONST"
+    outputs:
+      out: "never_true"
+    params:
+      value: false
+
+scan_time_ms: 50
+===== ./petra/config/example_logic.yaml =====
+signals:
+  - name: "start_button"
+    type: "bool"
+    initial: false
+  - name: "stop_button"
+    type: "bool"
+    initial: false
+  - name: "motor_run"
+    type: "bool"
+    initial: false
+  - name: "timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "start_button"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "motor_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "stop_button"
+    outputs:
+      q: "motor_run"
+      
+  - name: "run_timer"
+    type: "TON"
+    inputs:
+      in: "motor_run"
+    outputs:
+      q: "timer_done"
+    params:
+      preset_ms: 5000
+===== ./petra/config/pump_alternation.yaml =====
+# Example: 5-pump alternation based on pressure
+# Rotates through pumps each time pressure drops below setpoint
+
+signals:
+  # Process values
+  - name: "pressure"
+    type: "float"
+    initial: 55.0
+    
+  # Setpoints
+  - name: "pressure_start_sp"
+    type: "float"
+    initial: 50.0
+  - name: "pressure_stop_sp"
+    type: "float"
+    initial: 60.0
+    
+  # Control signals
+  - name: "system_reset"
+    type: "bool"
+    initial: false
+  - name: "manual_override"
+    type: "bool"
+    initial: false
+    
+  # Pump outputs
+  - name: "pump1_run"
+    type: "bool"
+    initial: false
+  - name: "pump2_run"
+    type: "bool"
+    initial: false
+  - name: "pump3_run"
+    type: "bool"
+    initial: false
+  - name: "pump4_run"
+    type: "bool"
+    initial: false
+  - name: "pump5_run"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "pressure_low"
+    type: "bool"
+    initial: false
+  - name: "pressure_ok"
+    type: "bool"
+    initial: false
+  - name: "start_trigger"
+    type: "bool"
+    initial: false
+  - name: "stop_trigger"
+    type: "bool"
+    initial: false
+  - name: "pump_index"
+    type: "int"
+    initial: 0
+  - name: "pump_running"
+    type: "bool"
+    initial: false
+  - name: "auto_mode"
+    type: "bool"
+    initial: true
+
+blocks:
+  # Pressure monitoring
+  - name: "low_pressure_detect"
+    type: "LT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_start_sp"
+    outputs:
+      out: "pressure_low"
+      
+  - name: "pressure_ok_detect"
+    type: "GT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_stop_sp"
+    outputs:
+      out: "pressure_ok"
+      
+  # Edge detection for pump control
+  - name: "start_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_low"
+    outputs:
+      q: "start_trigger"
+      
+  - name: "stop_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_ok"
+    outputs:
+      q: "stop_trigger"
+      
+  # Pump sequencer - rotates on each start
+  - name: "pump_selector"
+    type: "SEQUENCER"
+    inputs:
+      trigger: "start_trigger"
+      reset: "system_reset"
+    outputs:
+      index: "pump_index"
+    params:
+      max: 5
+      
+  # Pump run latch
+  - name: "pump_run_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_trigger"
+      reset: "stop_trigger"
+    outputs:
+      q: "pump_running"
+      
+  # Auto/Manual mode
+  - name: "manual_mode_not"
+    type: "NOT"
+    inputs:
+      in: "manual_override"
+    outputs:
+      out: "auto_mode"
+      
+  # Auto control enable
+  - name: "auto_control"
+    type: "AND"
+    inputs:
+      in1: "pump_running"
+      in2: "auto_mode"
+    outputs:
+      out: "auto_pump_enable"
+      
+  # Pump selection logic
+  - name: "pump1_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_0"
+    outputs:
+      out: "pump1_selected"
+      
+  - name: "pump2_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_1"
+    outputs:
+      out: "pump2_selected"
+      
+  - name: "pump3_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_2"
+    outputs:
+      out: "pump3_selected"
+      
+  - name: "pump4_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_3"
+    outputs:
+      out: "pump4_selected"
+      
+  - name: "pump5_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_4"
+    outputs:
+      out: "pump5_selected"
+      
+  # Final pump outputs
+  - name: "pump1_control"
+    type: "AND"
+    inputs:
+      in1: "pump1_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump1_run"
+      
+  - name: "pump2_control"
+    type: "AND"
+    inputs:
+      in1: "pump2_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump2_run"
+      
+  - name: "pump3_control"
+    type: "AND"
+    inputs:
+      in1: "pump3_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump3_run"
+      
+  - name: "pump4_control"
+    type: "AND"
+    inputs:
+      in1: "pump4_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump4_run"
+      
+  - name: "pump5_control"
+    type: "AND"
+    inputs:
+      in1: "pump5_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump5_run"
+      
+  # Constants for pump selection
+  - name: "const_0_block"
+    type: "CONST"
+    outputs:
+      out: "const_0"
+    params:
+      value: 0
+      
+  - name: "const_1_block"
+    type: "CONST"
+    outputs:
+      out: "const_1"
+    params:
+      value: 1
+      
+  - name: "const_2_block"
+    type: "CONST"
+    outputs:
+      out: "const_2"
+    params:
+      value: 2
+      
+  - name: "const_3_block"
+    type: "CONST"
+    outputs:
+      out: "const_3"
+    params:
+      value: 3
+      
+  - name: "const_4_block"
+    type: "CONST"
+    outputs:
+      out: "const_4"
+    params:
+      value: 4
+
+scan_time_ms: 100
+===== ./petra/config/test_basic.yaml =====
+signals:
+  - name: "test_input"
+    type: "bool"
+    initial: false
+  - name: "test_output"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "simple_not"
+    type: "NOT"
+    inputs:
+      in: "test_input"
+    outputs:
+      out: "test_output"
+
+scan_time_ms: 100
+===== ./petra/src/main.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use tracing::{info, error};
+use tracing_subscriber;
+use tokio::signal;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+    
+    info!("Soft-PLC starting...");
+    
+    // Get config file from command line or use default
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config/example_logic.yaml".to_string());
+    
+    info!("Loading configuration from: {}", config_path);
+    
+    // Create and start scan engine
+    let mut engine = ScanEngine::from_file(&config_path)?;
+    
+    // Clone signal bus for monitoring
+    let signal_bus = engine.signal_bus().clone();
+    
+    // Spawn monitoring task
+    let monitor_handle = tokio::spawn(async move {
+        let mut monitor_interval = tokio::time::interval(Duration::from_secs(1));
+        
+        loop {
+            monitor_interval.tick().await;
+            
+            // Print key signals
+            if let Ok(motor_run) = signal_bus.get("motor_run") {
+                info!("Motor status: {:?}", motor_run);
+            }
+            
+            if let Ok(timer_done) = signal_bus.get("timer_done") {
+                info!("Timer status: {:?}", timer_done);
+            }
+        }
+    });
+    
+    // Spawn engine task
+    let engine_handle = tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            error!("Engine error: {}", e);
+        }
+    });
+    
+    // Wait for Ctrl+C
+    info!("PLC running. Press Ctrl+C to stop...");
+    signal::ctrl_c().await?;
+    
+    info!("Shutdown signal received");
+    
+    // Stop tasks
+    monitor_handle.abort();
+    engine_handle.abort();
+    
+    info!("Soft-PLC stopped");
+    Ok(())
+}
+===== ./petra/src/error.rs =====
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PlcError {
+    #[error("Signal not found: {0}")]
+    SignalNotFound(String),
+    
+    #[error("Invalid signal type: expected {expected}, got {actual}")]
+    TypeMismatch { expected: String, actual: String },
+    
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+    
+    #[error("Block execution error: {0}")]
+    ExecutionError(String),
+    
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+    
+    #[error("YAML parsing error: {0}")]
+    YamlError(#[from] serde_yaml::Error),
+}
+
+pub type Result<T> = std::result::Result<T, PlcError>;
+===== ./petra/src/examples/pump_monitor.rs =====
+use soft_plc::{engine::ScanEngine, signal::SignalValue};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> soft_plc::Result<()> {
+    let config_path = "config/pump_alternation.yaml";
+    let mut engine = ScanEngine::from_file(config_path)?;
+    
+    // Spawn engine task
+    let engine_handle = tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            eprintln!("Engine error: {}", e);
+        }
+    });
+    
+    // Monitor in main task
+    let bus = engine.signal_bus().clone();
+    let mut monitor_interval = tokio::time::interval(Duration::from_secs(1));
+    
+    println!("=== Pump Alternation Monitor ===");
+    println!("Commands:");
+    println!("  Press 'p' to drop pressure");
+    println!("  Press 'r' to recover pressure");
+    println!("  Press 's' to reset system");
+    println!("  Press 'q' to quit\n");
+    
+    loop {
+        monitor_interval.tick().await;
+        
+        // Display status
+        print!("\x1B[2J\x1B[1;1H"); // Clear screen
+        println!("=== Pump Status ===");
+        
+        if let Ok(pressure) = bus.get("pressure") {
+            println!("Pressure: {:?}", pressure);
+        }
+        
+        if let Ok(index) = bus.get("pump_index") {
+            println!("Active Pump Index: {:?}", index);
+        }
+        
+        println!("\nPump States:");
+        for i in 1..=5 {
+            if let Ok(state) = bus.get(&format!("pump{}_run", i)) {
+                let status = match state {
+                    SignalValue::Bool(true) => "RUNNING",
+                    _ => "OFF"
+                };
+                println!("  Pump {}: {}", i, status);
+            }
+        }
+        
+        // Simple command handling (would need proper async stdin in production)
+        // This is just for demonstration
+    }
+    
+    engine_handle.abort();
+    Ok(())
+}
+===== ./petra/src/blocks/traits.rs =====
+use crate::{Result, signal::SignalBus};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub trait Block: Send + Sync {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()>;
+    fn name(&self) -> &str;
+    fn block_type(&self) -> &str;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub inputs: HashMap<String, String>,
+    pub outputs: HashMap<String, String>,
+    #[serde(default)]
+    pub params: HashMap<String, serde_yaml::Value>,
+}
+===== ./petra/src/blocks/timers/ton.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer On Delay - output turns on after input has been true for preset time
+pub struct TON {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+}
+
+impl TON {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: false,
+        })
+    }
+}
+
+impl Block for TON {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        if current_input && !self.prev_input {
+            // Rising edge - start timing
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+        } else if !current_input {
+            // Input is false - reset
+            self.start_time = None;
+            self.elapsed_ms = 0;
+        } else if current_input && self.start_time.is_some() {
+            // Input remains true - update elapsed time
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs
+        let done = current_input && self.elapsed_ms >= self.preset_ms;
+        bus.set(&self.output, SignalValue::Bool(done))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TON"
+    }
+}
+===== ./petra/src/blocks/timers/tof.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer Off Delay - output turns off after input has been false for preset time
+pub struct TOF {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+}
+
+impl TOF {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: true,
+        })
+    }
+}
+
+impl Block for TOF {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        if !current_input && self.prev_input {
+            // Falling edge - start timing
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+        } else if current_input {
+            // Input is true - reset
+            self.start_time = None;
+            self.elapsed_ms = 0;
+        } else if !current_input && self.start_time.is_some() {
+            // Input remains false - update elapsed time
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs - output stays on until timer expires
+        let done = current_input || (self.elapsed_ms < self.preset_ms);
+        bus.set(&self.output, SignalValue::Bool(done))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TOF"
+    }
+}
+===== ./petra/src/blocks/timers/tp.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer Pulse - generates a pulse of preset duration on rising edge of input
+pub struct TP {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+    pulse_active: bool,
+}
+
+impl TP {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: false,
+            pulse_active: false,
+        })
+    }
+}
+
+impl Block for TP {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        // Detect rising edge
+        if current_input && !self.prev_input && !self.pulse_active {
+            // Start pulse
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+            self.pulse_active = true;
+        }
+        
+        // Update timing if pulse is active
+        if self.pulse_active && self.start_time.is_some() {
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+            
+            // Check if pulse duration exceeded
+            if self.elapsed_ms >= self.preset_ms {
+                self.pulse_active = false;
+                self.start_time = None;
+            }
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs
+        bus.set(&self.output, SignalValue::Bool(self.pulse_active))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TP"
+    }
+}
+===== ./petra/src/blocks/timers/mod.rs =====
+mod ton;
+mod tof;
+mod tp;
+
+pub use ton::TON;
+pub use tof::TOF;
+pub use tp::TP;
+===== ./petra/src/blocks/basic/const_block.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Constant value block - outputs a constant value
+pub struct ConstBlock {
+    name: String,
+    output: String,
+    value: SignalValue,
+}
+
+impl ConstBlock {
+    pub fn new(
+        name: String,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("CONST requires 'out' output".to_string()))?
+            .clone();
+            
+        let value_param = params.get("value")
+            .ok_or_else(|| crate::PlcError::ConfigError("CONST requires 'value' parameter".to_string()))?;
+            
+        // Determine value type from YAML
+        let value = if let Some(b) = value_param.as_bool() {
+            SignalValue::Bool(b)
+        } else if let Some(i) = value_param.as_i64() {
+            SignalValue::Int(i as i32)
+        } else if let Some(f) = value_param.as_f64() {
+            SignalValue::Float(f)
+        } else if let Some(s) = value_param.as_str() {
+            SignalValue::String(s.to_string())
+        } else {
+            return Err(crate::PlcError::ConfigError("CONST value must be bool, int, float, or string".to_string()));
+        };
+            
+        Ok(Self { name, output, value })
+    }
+}
+
+impl Block for ConstBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        bus.set(&self.output, self.value.clone())?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "CONST"
+    }
+}
+===== ./petra/src/blocks/basic/comparison.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Equal comparison block
+pub struct EqBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl EqBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for EqBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Bool(a), SignalValue::Bool(b)) => a == b,
+            (SignalValue::Int(a), SignalValue::Int(b)) => a == b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            (SignalValue::String(a), SignalValue::String(b)) => a == b,
+            _ => false,
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "EQ"
+    }
+}
+
+/// Greater than comparison block
+pub struct GtBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl GtBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for GtBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Int(a), SignalValue::Int(b)) => a > b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => a > b,
+            _ => return Err(crate::PlcError::TypeMismatch {
+                expected: "numeric".to_string(),
+                actual: "non-numeric".to_string(),
+            }),
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "GT"
+    }
+}
+
+/// Less than comparison block
+pub struct LtBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl LtBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for LtBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Int(a), SignalValue::Int(b)) => a < b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => a < b,
+            _ => return Err(crate::PlcError::TypeMismatch {
+                expected: "numeric".to_string(),
+                actual: "non-numeric".to_string(),
+            }),
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "LT"
+    }
+}
+===== ./petra/src/blocks/basic/logic.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+pub struct AndBlock {
+    name: String,
+    inputs: Vec<String>,
+    output: String,
+}
+
+impl AndBlock {
+    pub fn new(name: String, config: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let inputs: Vec<String> = config.iter()
+            .filter(|(k, _)| k.starts_with("in"))
+            .map(|(_, v)| v.clone())
+            .collect();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("AND block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, inputs, output })
+    }
+}
+
+impl Block for AndBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let mut result = true;
+        
+        for input in &self.inputs {
+            result = result && bus.get_bool(input)?;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "AND"
+    }
+}
+
+pub struct OrBlock {
+    name: String,
+    inputs: Vec<String>,
+    output: String,
+}
+
+impl OrBlock {
+    pub fn new(name: String, config: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let inputs: Vec<String> = config.iter()
+            .filter(|(k, _)| k.starts_with("in"))
+            .map(|(_, v)| v.clone())
+            .collect();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("OR block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, inputs, output })
+    }
+}
+
+impl Block for OrBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let mut result = false;
+        
+        for input in &self.inputs {
+            result = result || bus.get_bool(input)?;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "OR"
+    }
+}
+
+pub struct NotBlock {
+    name: String,
+    input: String,
+    output: String,
+}
+
+impl NotBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("NOT block requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("NOT block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input, output })
+    }
+}
+
+impl Block for NotBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let value = bus.get_bool(&self.input)?;
+        bus.set(&self.output, SignalValue::Bool(!value))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "NOT"
+    }
+}
+===== ./petra/src/blocks/basic/mod.rs =====
+mod logic;
+mod comparison;
+mod const_block;
+
+pub use logic::{AndBlock, OrBlock, NotBlock};
+pub use comparison::{EqBlock, GtBlock, LtBlock};
+pub use const_block::ConstBlock;mod logic;
+mod comparison;
+
+pub use logic::{AndBlock, OrBlock, NotBlock};
+pub use comparison::{EqBlock, GtBlock, LtBlock};
+===== ./petra/src/blocks/triggers/f_trig.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Falling edge trigger - outputs true for one scan when input transitions from true to false
+pub struct FTrig {
+    name: String,
+    input: String,
+    output: String,
+    prev_state: bool,
+}
+
+impl FTrig {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("clk")
+            .ok_or_else(|| crate::PlcError::ConfigError("F_TRIG requires 'clk' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("F_TRIG requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            prev_state: false,
+        })
+    }
+}
+
+impl Block for FTrig {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current = bus.get_bool(&self.input)?;
+        let falling_edge = !current && self.prev_state;
+        self.prev_state = current;
+        
+        bus.set(&self.output, SignalValue::Bool(falling_edge))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "F_TRIG"
+    }
+}
+===== ./petra/src/blocks/triggers/sr_latch.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+pub struct SRLatch {
+    name: String,
+    set_input: String,
+    reset_input: String,
+    output: String,
+    state: bool,
+}
+
+impl SRLatch {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let set_input = inputs.get("set")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'set' input".to_string()))?
+            .clone();
+            
+        let reset_input = inputs.get("reset")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'reset' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            set_input,
+            reset_input,
+            output,
+            state: false,
+        })
+    }
+}
+
+impl Block for SRLatch {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let set = bus.get_bool(&self.set_input)?;
+        let reset = bus.get_bool(&self.reset_input)?;
+        
+        // Reset has priority
+        if reset {
+            self.state = false;
+        } else if set {
+            self.state = true;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(self.state))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "SR_LATCH"
+    }
+}
+===== ./petra/src/blocks/triggers/r_trig.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Rising edge trigger - outputs true for one scan when input transitions from false to true
+pub struct RTrig {
+    name: String,
+    input: String,
+    output: String,
+    prev_state: bool,
+}
+
+impl RTrig {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("clk")
+            .ok_or_else(|| crate::PlcError::ConfigError("R_TRIG requires 'clk' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("R_TRIG requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            prev_state: false,
+        })
+    }
+}
+
+impl Block for RTrig {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current = bus.get_bool(&self.input)?;
+        let rising_edge = current && !self.prev_state;
+        self.prev_state = current;
+        
+        bus.set(&self.output, SignalValue::Bool(rising_edge))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "R_TRIG"
+    }
+}
+===== ./petra/src/blocks/triggers/mod.rs =====
+mod r_trig;
+mod f_trig;
+mod sr_latch;
+
+pub use r_trig::RTrig;
+pub use f_trig::FTrig;
+pub use sr_latch::SRLatch;
+===== ./petra/src/blocks/mod.rs =====
+pub mod traits;
+pub mod basic;
+pub mod timers;
+pub mod triggers;
+pub mod counters;
+
+use crate::{Result, PlcError};
+use traits::{Block, BlockConfig};
+
+// Re-export commonly used items
+pub use traits::Block as BlockTrait;
+pub use traits::BlockConfig;
+
+/// Factory function to create blocks from configuration
+pub fn create_block(config: &BlockConfig) -> Result<Box<dyn Block>> {
+    match config.block_type.as_str() {
+        // Logic blocks
+        "AND" => Ok(Box::new(basic::AndBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "OR" => Ok(Box::new(basic::OrBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "NOT" => Ok(Box::new(basic::NotBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Comparison blocks
+        "EQ" => Ok(Box::new(basic::EqBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "GT" => Ok(Box::new(basic::GtBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "LT" => Ok(Box::new(basic::LtBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Trigger blocks
+        "R_TRIG" => Ok(Box::new(triggers::RTrig::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "F_TRIG" => Ok(Box::new(triggers::FTrig::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "SR_LATCH" => Ok(Box::new(triggers::SRLatch::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Timer blocks
+        "TON" => Ok(Box::new(timers::TON::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        "TOF" => Ok(Box::new(timers::TOF::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        "TP" => Ok(Box::new(timers::TP::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        // Counter blocks
+        "COUNTER" => Ok(Box::new(counters::Counter::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        _ => Err(PlcError::ConfigError(format!(
+            "Unknown block type: {}",
+            config.block_type
+        ))),
+    }
+}
+===== ./petra/src/blocks/counters/counter.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Up/Down Counter with preset value
+pub struct Counter {
+    name: String,
+    count_up: String,
+    count_down: String,
+    reset: String,
+    preset_input: Option<String>,
+    output: String,
+    done_output: Option<String>,
+    preset: i32,
+    count: i32,
+    prev_up: bool,
+    prev_down: bool,
+}
+
+impl Counter {
+    pub fn new(
+        name: String,
+        inputs: &HashMap<String, String>,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let count_up = inputs.get("cu")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cu' input".to_string()))?
+            .clone();
+            
+        let count_down = inputs.get("cd")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cd' input".to_string()))?
+            .clone();
+            
+        let reset = inputs.get("r")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'r' input".to_string()))?
+            .clone();
+            
+        let preset_input = inputs.get("pv").cloned();
+        
+        let output = outputs.get("cv")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cv' output".to_string()))?
+            .clone();
+            
+        let done_output = outputs.get("q").cloned();
+        
+        let preset = params.get("preset")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(0);
+            
+        Ok(Self {
+            name,
+            count_up,
+            count_down,
+            reset,
+            preset_input,
+            output,
+            done_output,
+            preset,
+            count: 0,
+            prev_up: false,
+            prev_down: false,
+        })
+    }
+}
+
+impl Block for Counter {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        // Check reset first
+        if bus.get_bool(&self.reset)? {
+            self.count = 0;
+        } else {
+            // Get current preset value if input is connected
+            if let Some(pv) = &self.preset_input {
+                if let Ok(preset_value) = bus.get_int(pv) {
+                    self.preset = preset_value;
+                }
+            }
+            
+            // Check for count up edge
+            let current_up = bus.get_bool(&self.count_up)?;
+            if current_up && !self.prev_up {
+                self.count += 1;
+            }
+            self.prev_up = current_up;
+            
+            // Check for count down edge
+            let current_down = bus.get_bool(&self.count_down)?;
+            if current_down && !self.prev_down {
+                self.count -= 1;
+            }
+            self.prev_down = current_down;
+        }
+        
+        // Set outputs
+        bus.set(&self.output, SignalValue::Int(self.count))?;
+        
+        if let Some(done) = &self.done_output {
+            bus.set(done, SignalValue::Bool(self.count >= self.preset))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "COUNTER"
+    }
+}
+===== ./petra/src/blocks/counters/mod.rs =====
+mod counter;
+mod sequencer;
+
+pub use counter::Counter;
+pub use sequencer::Sequencer;
+===== ./petra/src/blocks/counters/sequencer.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Sequencer - Simple incrementing counter with wrap-around
+/// Increments on rising edge of trigger, wraps at max value
+/// Perfect for rotating equipment, pump alternation, etc.
+pub struct Sequencer {
+    name: String,
+    trigger: String,
+    reset: String,
+    index_output: String,
+    max: i32,
+    current_index: i32,
+    prev_trigger: bool,
+}
+
+impl Sequencer {
+    pub fn new(
+        name: String,
+        inputs: &HashMap<String, String>,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let trigger = inputs.get("trigger")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'trigger' input".to_string()))?
+            .clone();
+            
+        let reset = inputs.get("reset")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'reset' input".to_string()))?
+            .clone();
+            
+        let index_output = outputs.get("index")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'index' output".to_string()))?
+            .clone();
+            
+        let max = params.get("max")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'max' parameter".to_string()))?;
+            
+        if max <= 0 {
+            return Err(crate::PlcError::ConfigError("SEQUENCER 'max' must be positive".to_string()));
+        }
+            
+        Ok(Self {
+            name,
+            trigger,
+            reset,
+            index_output,
+            max,
+            current_index: 0,
+            prev_trigger: false,
+        })
+    }
+}
+
+impl Block for Sequencer {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        // Check reset first (highest priority)
+        if bus.get_bool(&self.reset)? {
+            self.current_index = 0;
+            self.prev_trigger = false;
+        } else {
+            // Check for rising edge on trigger
+            let current_trigger = bus.get_bool(&self.trigger)?;
+            
+            if current_trigger && !self.prev_trigger {
+                // Increment and wrap
+                self.current_index = (self.current_index + 1) % self.max;
+            }
+            
+            self.prev_trigger = current_trigger;
+        }
+        
+        // Always output current index
+        bus.set(&self.index_output, SignalValue::Int(self.current_index))?;
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "SEQUENCER"
+    }
+}
+===== ./petra/src/lib.rs =====
+pub mod signal;
+pub mod blocks;
+pub mod engine;
+pub mod error;
+
+pub use error::{PlcError, Result};
+===== ./petra/src/signal/bus.rs =====
+use dashmap::DashMap;
+use std::sync::Arc;
+use crate::{PlcError, Result};
+use super::SignalValue;
+
+#[derive(Clone)]
+pub struct SignalBus {
+    signals: Arc<DashMap<String, SignalValue>>,
+}
+
+impl SignalBus {
+    pub fn new() -> Self {
+        Self {
+            signals: Arc::new(DashMap::new()),
+        }
+    }
+    
+    pub fn set(&self, name: &str, value: SignalValue) -> Result<()> {
+        self.signals.insert(name.to_string(), value);
+        Ok(())
+    }
+    
+    pub fn get(&self, name: &str) -> Result<SignalValue> {
+        self.signals
+            .get(name)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| PlcError::SignalNotFound(name.to_string()))
+    }
+    
+    pub fn get_bool(&self, name: &str) -> Result<bool> {
+        let value = self.get(name)?;
+        value.as_bool()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn get_int(&self, name: &str) -> Result<i32> {
+        let value = self.get(name)?;
+        value.as_int()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "int".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn get_float(&self, name: &str) -> Result<f64> {
+        let value = self.get(name)?;
+        value.as_float()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "float".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn exists(&self, name: &str) -> bool {
+        self.signals.contains_key(name)
+    }
+    
+    pub fn clear(&self) {
+        self.signals.clear();
+    }
+    
+    pub fn iter(&self) -> impl Iterator<Item = (String, SignalValue)> {
+        self.signals.iter().map(|entry| (entry.key().clone(), entry.value().clone()))
+    }
+}
+===== ./petra/src/signal/value.rs =====
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SignalValue {
+    Bool(bool),
+    Int(i32),
+    Float(f64),
+    String(String),
+}
+
+impl SignalValue {
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            SignalValue::Bool(b) => Some(*b),
+            SignalValue::Int(i) => Some(*i != 0),
+            _ => None,
+        }
+    }
+    
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            SignalValue::Int(i) => Some(*i),
+            SignalValue::Bool(b) => Some(if *b { 1 } else { 0 }),
+            SignalValue::Float(f) => Some(*f as i32),
+            _ => None,
+        }
+    }
+    
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            SignalValue::Float(f) => Some(*f),
+            SignalValue::Int(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+    
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            SignalValue::Bool(_) => "bool",
+            SignalValue::Int(_) => "int",
+            SignalValue::Float(_) => "float",
+            SignalValue::String(_) => "string",
+        }
+    }
+}
+===== ./petra/src/signal/mod.rs =====
+mod value;
+mod bus;
+
+pub use value::SignalValue;
+pub use bus::SignalBus;
+===== ./petra/src/bin/live_test.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use std::io::{self, Write};
+use tokio::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("=== Soft-PLC Live Test ===");
+    println!("Loading pump alternation example...\n");
+    
+    let mut engine = ScanEngine::from_file("config/pump_alternation.yaml")?;
+    let bus = engine.signal_bus().clone();
+    
+    // Start engine in background
+    let engine_handle = tokio::spawn(async move {
+        engine.run().await
+    });
+    
+    // Interactive control loop
+    let stdin = io::stdin();
+    let mut input = String::new();
+    
+    loop {
+        // Display status
+        println!("\n--- Current Status ---");
+        if let Ok(pressure) = bus.get("pressure") {
+            println!("Pressure: {:?}", pressure);
+        }
+        if let Ok(index) = bus.get("pump_index") {
+            println!("Pump Index: {:?}", index);
+        }
+        
+        // Show pump states
+        print!("Pumps: ");
+        for i in 1..=5 {
+            if let Ok(SignalValue::Bool(running)) = bus.get(&format!("pump{}_run", i)) {
+                if running {
+                    print!("[P{}:ON] ", i);
+                } else {
+                    print!("[P{}:--] ", i);
+                }
+            }
+        }
+        println!("\n");
+        
+        // Menu
+        println!("Commands:");
+        println!("  1 - Set pressure to 45 (trigger pump)");
+        println!("  2 - Set pressure to 65 (stop pump)");
+        println!("  3 - Toggle manual override");
+        println!("  4 - System reset");
+        println!("  5 - Show all signals");
+        println!("  q - Quit");
+        print!("\nChoice: ");
+        io::stdout().flush().unwrap();
+        
+        input.clear();
+        stdin.read_line(&mut input).unwrap();
+        
+        match input.trim() {
+            "1" => {
+                bus.set("pressure", SignalValue::Float(45.0))?;
+                println!("→ Pressure set to 45.0");
+            }
+            "2" => {
+                bus.set("pressure", SignalValue::Float(65.0))?;
+                println!("→ Pressure set to 65.0");
+            }
+            "3" => {
+                let current = bus.get_bool("manual_override").unwrap_or(false);
+                bus.set("manual_override", SignalValue::Bool(!current))?;
+                println!("→ Manual override: {}", !current);
+            }
+            "4" => {
+                bus.set("system_reset", SignalValue::Bool(true))?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bus.set("system_reset", SignalValue::Bool(false))?;
+                println!("→ System reset");
+            }
+            "5" => {
+                println!("\n=== All Signals ===");
+                let mut signals: Vec<_> = bus.iter().collect();
+                signals.sort_by(|a, b| a.0.cmp(&b.0));
+                for (name, value) in signals {
+                    println!("  {:<25} = {:?}", name, value);
+                }
+            }
+            "q" => break,
+            _ => println!("Invalid choice"),
+        }
+        
+        // Give engine time to process
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    
+    engine_handle.abort();
+    println!("\nShutting down...");
+    Ok(())
+}
+===== ./petra/src/bin/test_runner.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("Starting Soft-PLC Test Runner...\n");
+    
+    // Test 1: Basic functionality
+    println!("Test 1: Basic NOT gate");
+    let mut engine = ScanEngine::from_file("config/test_basic.yaml")?;
+    let bus = engine.signal_bus();
+    
+    // Run one scan manually
+    for block in &mut engine.blocks {
+        block.execute(bus)?;
+    }
+    
+    // Check initial state
+    let output = bus.get_bool("test_output")?;
+    println!("  Input: false, Output: {} (expected: true)", output);
+    assert_eq!(output, true);
+    
+    // Change input
+    bus.set("test_input", SignalValue::Bool(true))?;
+    for block in &mut engine.blocks {
+        block.execute(bus)?;
+    }
+    
+    let output = bus.get_bool("test_output")?;
+    println!("  Input: true, Output: {} (expected: false)", output);
+    assert_eq!(output, false);
+    
+    println!("✓ Test 1 passed!\n");
+    
+    // Test 2: Timer functionality
+    println!("Test 2: Timer (TON) functionality");
+    test_timer().await?;
+    
+    // Test 3: Sequencer
+    println!("\nTest 3: Sequencer functionality");
+    test_sequencer()?;
+    
+    println!("\n✅ All tests passed!");
+    Ok(())
+}
+
+async fn test_timer() -> Result<()> {
+    let yaml = r#"
+signals:
+  - name: "timer_input"
+    type: "bool"
+    initial: false
+  - name: "timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "test_timer"
+    type: "TON"
+    inputs:
+      in: "timer_input"
+    outputs:
+      q: "timer_done"
+    params:
+      preset_ms: 200
+      
+scan_time_ms: 50
+"#;
+
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml)?;
+    let mut engine = ScanEngine::new(config)?;
+    let bus = engine.signal_bus();
+    
+    // Start timer
+    bus.set("timer_input", SignalValue::Bool(true))?;
+    
+    // Run scans for 100ms (timer not done)
+    for _ in 0..2 {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    
+    let done = bus.get_bool("timer_done")?;
+    println!("  After 100ms: timer_done = {} (expected: false)", done);
+    assert_eq!(done, false);
+    
+    // Run scans for another 150ms (timer should complete)
+    for _ in 0..3 {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    
+    let done = bus.get_bool("timer_done")?;
+    println!("  After 250ms: timer_done = {} (expected: true)", done);
+    assert_eq!(done, true);
+    
+    println!("✓ Test 2 passed!");
+    Ok(())
+}
+
+fn test_sequencer() -> Result<()> {
+    let yaml = r#"
+signals:
+  - name: "trigger"
+    type: "bool"
+    initial: false
+  - name: "reset"
+    type: "bool" 
+    initial: false
+  - name: "index"
+    type: "int"
+    initial: 0
+
+blocks:
+  - name: "test_seq"
+    type: "SEQUENCER"
+    inputs:
+      trigger: "trigger"
+      reset: "reset"
+    outputs:
+      index: "index"
+    params:
+      max: 3
+"#;
+
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml)?;
+    let mut engine = ScanEngine::new(config)?;
+    let bus = engine.signal_bus();
+    
+    // Helper to run one scan
+    let mut run_scan = || -> Result<()> {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        Ok(())
+    };
+    
+    // Initial state
+    run_scan()?;
+    assert_eq!(bus.get_int("index")?, 0);
+    println!("  Initial index: 0");
+    
+    // Trigger sequence
+    for expected in 1..6 {
+        // Rising edge
+        bus.set("trigger", SignalValue::Bool(true))?;
+        run_scan()?;
+        
+        // Falling edge
+        bus.set("trigger", SignalValue::Bool(false))?;
+        run_scan()?;
+        
+        let index = bus.get_int("index")?;
+        let expected_wrapped = expected % 3;
+        println!("  After trigger {}: index = {} (expected: {})", 
+                 expected, index, expected_wrapped);
+        assert_eq!(index, expected_wrapped);
+    }
+    
+    // Test reset
+    bus.set("reset", SignalValue::Bool(true))?;
+    run_scan()?;
+    let index = bus.get_int("index")?;
+    println!("  After reset: index = {} (expected: 0)", index);
+    assert_eq!(index, 0);
+    
+    println!("✓ Test 3 passed!");
+    Ok(())
+}
+===== ./petra/src/engine/scan.rs =====
+use crate::{Result, PlcError, signal::SignalBus, blocks};
+use crate::engine::config::PlcConfig;
+use tokio::time::{interval, Duration};
+use tracing::{info, error, debug};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct ScanEngine {
+    config: PlcConfig,
+    signal_bus: SignalBus,
+    blocks: Vec<Box<dyn blocks::BlockTrait>>,
+    running: Arc<RwLock<bool>>,
+    scan_count: u64,
+}
+
+impl ScanEngine {
+    pub fn new(config: PlcConfig) -> Result<Self> {
+        let signal_bus = SignalBus::new();
+        
+        // Initialize signals
+        for signal_config in &config.signals {
+            let initial_value = signal_config.to_signal_value()?;
+            signal_bus.set(&signal_config.name, initial_value)?;
+            debug!("Initialized signal '{}' with type '{}'", 
+                signal_config.name, signal_config.signal_type);
+        }
+        
+        // Create blocks
+        let mut blocks = Vec::new();
+        for block_config in &config.blocks {
+            let block = blocks::create_block(block_config)?;
+            info!("Created block '{}' of type '{}'", 
+                block_config.name, block_config.block_type);
+            blocks.push(block);
+        }
+        
+        Ok(Self {
+            config,
+            signal_bus,
+            blocks,
+            running: Arc::new(RwLock::new(false)),
+            scan_count: 0,
+        })
+    }
+    
+    pub fn from_file(config_path: &str) -> Result<Self> {
+        let config = PlcConfig::from_file(config_path)?;
+        Self::new(config)
+    }
+    
+    pub fn signal_bus(&self) -> &SignalBus {
+        &self.signal_bus
+    }
+    
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Starting scan engine with {}ms scan time", self.config.scan_time_ms);
+        
+        {
+            let mut running = self.running.write().await;
+            *running = true;
+        }
+        
+        let mut scan_interval = interval(Duration::from_millis(self.config.scan_time_ms));
+        
+        while *self.running.read().await {
+            scan_interval.tick().await;
+            
+            let scan_start = std::time::Instant::now();
+            
+            // Execute all blocks in order
+            for block in &mut self.blocks {
+                if let Err(e) = block.execute(&self.signal_bus) {
+                    error!("Error executing block '{}': {}", block.name(), e);
+                    // Continue with other blocks even if one fails
+                }
+            }
+            
+            self.scan_count += 1;
+            let scan_duration = scan_start.elapsed();
+            
+            if scan_duration.as_millis() > self.config.scan_time_ms as u128 {
+                error!("Scan overrun: {}ms > {}ms", 
+                    scan_duration.as_millis(), self.config.scan_time_ms);
+            } else {
+                debug!("Scan {} completed in {:?}", self.scan_count, scan_duration);
+            }
+        }
+        
+        info!("Scan engine stopped after {} scans", self.scan_count);
+        Ok(())
+    }
+    
+    pub async fn stop(&self) {
+        info!("Stopping scan engine...");
+        let mut running = self.running.write().await;
+        *running = false;
+    }
+    
+    pub fn is_running(&self) -> bool {
+        // Try to read without blocking
+        self.running.try_read().map(|r| *r).unwrap_or(false)
+    }
+    
+    pub fn scan_count(&self) -> u64 {
+        self.scan_count
+    }
+    
+    pub fn dump_signals(&self) -> Vec<(String, SignalValue)> {
+        self.signal_bus.iter().collect()
+    }
+}
+===== ./petra/src/engine/config.rs =====
+use serde::{Deserialize, Serialize};
+use crate::{Result, PlcError, signal::SignalValue};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(default)]
+    pub initial: serde_yaml::Value,
+}
+
+impl SignalConfig {
+    pub fn to_signal_value(&self) -> Result<SignalValue> {
+        match self.signal_type.as_str() {
+            "bool" => {
+                let val = self.initial.as_bool().unwrap_or(false);
+                Ok(SignalValue::Bool(val))
+            }
+            "int" => {
+                let val = self.initial.as_i64().unwrap_or(0) as i32;
+                Ok(SignalValue::Int(val))
+            }
+            "float" => {
+                let val = self.initial.as_f64().unwrap_or(0.0);
+                Ok(SignalValue::Float(val))
+            }
+            "string" => {
+                let val = self.initial.as_str().unwrap_or("").to_string();
+                Ok(SignalValue::String(val))
+            }
+            _ => Err(PlcError::ConfigError(format!(
+                "Unknown signal type: {}",
+                self.signal_type
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlcConfig {
+    #[serde(default)]
+    pub signals: Vec<SignalConfig>,
+    #[serde(default)]
+    pub blocks: Vec<crate::blocks::BlockConfig>,
+    #[serde(default)]
+    pub scan_time_ms: u64,
+}
+
+impl Default for PlcConfig {
+    fn default() -> Self {
+        Self {
+            signals: Vec::new(),
+            blocks: Vec::new(),
+            scan_time_ms: 100, // Default 100ms scan time
+        }
+    }
+}
+
+impl PlcConfig {
+    pub fn from_yaml(yaml_str: &str) -> Result<Self> {
+        serde_yaml::from_str(yaml_str)
+            .map_err(|e| PlcError::YamlError(e))
+    }
+    
+    pub fn from_file(path: &str) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_yaml(&contents)
+    }
+}
+
+// src/engine/scan.rs
+use crate::{Result, signal::SignalBus, blocks};
+use crate::engine::config::PlcConfig;
+use crate::signal::SignalValue;
+use tokio::time::{interval, Duration};
+use tracing::{info, error, debug};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct ScanEngine {
+    config: PlcConfig,
+    signal_bus: SignalBus,
+    blocks: Vec<Box<dyn blocks::BlockTrait>>,
+    running: Arc<RwLock<bool>>,
+    scan_count: u64,
+}
+
+impl ScanEngine {
+    pub fn new(config: PlcConfig) -> Result<Self> {
+        let signal_bus = SignalBus::new();
+        
+        // Initialize signals
+        for signal_config in &config.signals {
+            let initial_value = signal_config.to_signal_value()?;
+            signal_bus.set(&signal_config.name, initial_value)?;
+            debug!("Initialized signal '{}' with type '{}'", 
+                signal_config.name, signal_config.signal_type);
+        }
+        
+        // Create blocks
+        let mut blocks = Vec::new();
+        for block_config in &config.blocks {
+            let block = blocks::create_block(block_config)?;
+            info!("Created block '{}' of type '{}'", 
+                block_config.name, block_config.block_type);
+            blocks.push(block);
+        }
+        
+        Ok(Self {
+            config,
+            signal_bus,
+            blocks,
+            running: Arc::new(RwLock::new(false)),
+            scan_count: 0,
+        })
+    }
+    
+    pub fn from_file(config_path: &str) -> Result<Self> {
+        let config = PlcConfig::from_file(config_path)?;
+        Self::new(config)
+    }
+    
+    pub fn signal_bus(&self) -> &SignalBus {
+        &self.signal_bus
+    }
+    
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Starting scan engine with {}ms scan time", self.config.scan_time_ms);
+        
+        {
+            let mut running = self.running.write().await;
+            *running = true;
+        }
+        
+        let mut scan_interval = interval(Duration::from_millis(self.config.scan_time_ms));
+        
+        while *self.running.read().await {
+            scan_interval.tick().await;
+            
+            let scan_start = std::time::Instant::now();
+            
+            // Execute all blocks in order
+            for block in &mut self.blocks {
+                if let Err(e) = block.execute(&self.signal_bus) {
+                    error!("Error executing block '{}': {}", block.name(), e);
+                    // Continue with other blocks even if one fails
+                }
+            }
+            
+            self.scan_count += 1;
+            let scan_duration = scan_start.elapsed();
+            
+            if scan_duration.as_millis() > self.config.scan_time_ms as u128 {
+                error!("Scan overrun: {}ms > {}ms", 
+                    scan_duration.as_millis(), self.config.scan_time_ms);
+            } else {
+                debug!("Scan {} completed in {:?}", self.scan_count, scan_duration);
+            }
+        }
+        
+        info!("Scan engine stopped after {} scans", self.scan_count);
+        Ok(())
+    }
+    
+    pub async fn stop(&self) {
+        info!("Stopping scan engine...");
+        let mut running = self.running.write().await;
+        *running = false;
+    }
+    
+    pub fn is_running(&self) -> bool {
+        // Try to read without blocking
+        self.running.try_read().map(|r| *r).unwrap_or(false)
+    }
+    
+    pub fn scan_count(&self) -> u64 {
+        self.scan_count
+    }
+    
+    pub fn dump_signals(&self) -> Vec<(String, SignalValue)> {
+        self.signal_bus.iter().collect()
+    }
+}
+===== ./petra/src/engine/mod.rs =====
+mod config;
+mod scan;
+
+pub use config::{PlcConfig, SignalConfig};
+pub use scan::ScanEngine;
+===== ./tests/pump_alternation_test.rs =====
+use soft_plc::{
+    signal::{SignalBus, SignalValue},
+    engine::ScanEngine,
+    Result,
+};
+use std::time::Duration;
+use tokio::time::sleep;
+
+#[tokio::test]
+async fn test_pump_alternation() -> Result<()> {
+    // Load the pump alternation configuration
+    let yaml_config = include_str!("../config/pump_alternation.yaml");
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml_config)?;
+    let mut engine = ScanEngine::new(config)?;
+    
+    let bus = engine.signal_bus();
+    
+    // Helper function to run one scan
+    async fn run_scan(engine: &mut ScanEngine) {
+        // Simulate scan execution
+        for block in &mut engine.blocks {
+            let _ = block.execute(engine.signal_bus());
+        }
+    }
+    
+    // Initial state - pressure is OK (55.0)
+    run_scan(&mut engine).await;
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    
+    println!("Initial state - all pumps off, index=0");
+    
+    // Simulate pressure drop below start setpoint
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await; // Need two scans for edge detection
+    
+    // Pump 1 should start (index 0)
+    assert_eq!(bus.get_bool("pump1_run")?, true);
+    assert_eq!(bus.get_bool("pump2_run")?, false);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("Low pressure detected - Pump 1 started");
+    
+    // Simulate pressure recovery
+    bus.set("pressure", SignalValue::Float(65.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // All pumps should stop
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    println!("Pressure recovered - Pump 1 stopped");
+    
+    // Second pressure drop - should start pump 2
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    assert_eq!(bus.get_bool("pump2_run")?, true);
+    assert_eq!(bus.get_int("pump_index")?, 1);
+    println!("Second low pressure - Pump 2 started");
+    
+    // Recover pressure
+    bus.set("pressure", SignalValue::Float(65.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // Test cycling through all pumps
+    for expected_index in 2..5 {
+        bus.set("pressure", SignalValue::Float(45.0))?;
+        run_scan(&mut engine).await;
+        run_scan(&mut engine).await;
+        
+        assert_eq!(bus.get_int("pump_index")?, expected_index);
+        println!("Pump {} started (index {})", expected_index + 1, expected_index);
+        
+        bus.set("pressure", SignalValue::Float(65.0))?;
+        run_scan(&mut engine).await;
+        run_scan(&mut engine).await;
+    }
+    
+    // Next cycle should wrap back to pump 1
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_bool("pump1_run")?, true);
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("Wrapped back to Pump 1");
+    
+    // Test reset functionality
+    bus.set("system_reset", SignalValue::Bool(true))?;
+    run_scan(&mut engine).await;
+    
+    assert_eq!(bus.get_int("pump_index")?, 0);
+    println!("System reset - index back to 0");
+    
+    // Test manual override
+    bus.set("manual_override", SignalValue::Bool(true))?;
+    bus.set("system_reset", SignalValue::Bool(false))?;
+    bus.set("pressure", SignalValue::Float(45.0))?;
+    run_scan(&mut engine).await;
+    run_scan(&mut engine).await;
+    
+    // No pumps should run in manual mode
+    assert_eq!(bus.get_bool("pump1_run")?, false);
+    println!("Manual override active - no auto pump control");
+    
+    Ok(())
+}
+===== ./config/advanced_example.yaml =====
+signals:
+  # Inputs
+  - name: "system_start"
+    type: "bool"
+    initial: false
+  - name: "system_stop"
+    type: "bool"
+    initial: false
+  - name: "emergency_stop"
+    type: "bool"
+    initial: false
+  - name: "part_detected"
+    type: "bool"
+    initial: false
+  - name: "conveyor_speed_setpoint"
+    type: "int"
+    initial: 50
+    
+  # Outputs
+  - name: "conveyor_run"
+    type: "bool"
+    initial: false
+  - name: "alarm_active"
+    type: "bool"
+    initial: false
+  - name: "part_count"
+    type: "int"
+    initial: 0
+  - name: "batch_complete"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "system_enabled"
+    type: "bool"
+    initial: false
+  - name: "start_pulse"
+    type: "bool"
+    initial: false
+  - name: "part_edge"
+    type: "bool"
+    initial: false
+  - name: "alarm_timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  # System control logic
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "system_start"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "system_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "system_stop"
+    outputs:
+      q: "system_enabled"
+      
+  - name: "emergency_check"
+    type: "NOT"
+    inputs:
+      in: "emergency_stop"
+    outputs:
+      out: "no_emergency"
+      
+  - name: "conveyor_control"
+    type: "AND"
+    inputs:
+      in1: "system_enabled"
+      in2: "no_emergency"
+    outputs:
+      out: "conveyor_run"
+      
+  # Part counting
+  - name: "part_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "part_detected"
+    outputs:
+      q: "part_edge"
+      
+  - name: "part_counter"
+    type: "COUNTER"
+    inputs:
+      cu: "part_edge"
+      cd: "never_true"
+      r: "batch_complete"
+    outputs:
+      cv: "part_count"
+      q: "batch_complete"
+    params:
+      preset: 100
+      
+  # Alarm logic
+  - name: "alarm_condition"
+    type: "AND"
+    inputs:
+      in1: "emergency_stop"
+      in2: "system_enabled"
+    outputs:
+      out: "alarm_trigger"
+      
+  - name: "alarm_timer"
+    type: "TP"
+    inputs:
+      in: "alarm_trigger"
+    outputs:
+      q: "alarm_active"
+    params:
+      preset_ms: 500
+      
+  # Speed monitoring
+  - name: "speed_limit_check"
+    type: "GT"
+    inputs:
+      in1: "conveyor_speed_setpoint"
+      in2: "max_speed"
+    outputs:
+      out: "speed_too_high"
+      
+  - name: "speed_alarm"
+    type: "OR"
+    inputs:
+      in1: "alarm_active"
+      in2: "speed_too_high"
+    outputs:
+      out: "any_alarm"
+
+# Initialize some constants
+  - name: "const_max_speed"
+    type: "CONST"
+    outputs:
+      out: "max_speed"
+    params:
+      value: 100
+      
+  - name: "const_false"
+    type: "CONST"
+    outputs:
+      out: "never_true"
+    params:
+      value: false
+
+scan_time_ms: 50
+===== ./config/example_logic.yaml =====
+signals:
+  - name: "start_button"
+    type: "bool"
+    initial: false
+  - name: "stop_button"
+    type: "bool"
+    initial: false
+  - name: "motor_run"
+    type: "bool"
+    initial: false
+  - name: "timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "start_button"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "motor_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "stop_button"
+    outputs:
+      q: "motor_run"
+      
+  - name: "run_timer"
+    type: "TON"
+    inputs:
+      in: "motor_run"
+    outputs:
+      q: "timer_done"
+    params:
+      preset_ms: 5000
+===== ./config/pump_alternation.yaml =====
+# Example: 5-pump alternation based on pressure
+# Rotates through pumps each time pressure drops below setpoint
+
+signals:
+  # Process values
+  - name: "pressure"
+    type: "float"
+    initial: 55.0
+    
+  # Setpoints
+  - name: "pressure_start_sp"
+    type: "float"
+    initial: 50.0
+  - name: "pressure_stop_sp"
+    type: "float"
+    initial: 60.0
+    
+  # Control signals
+  - name: "system_reset"
+    type: "bool"
+    initial: false
+  - name: "manual_override"
+    type: "bool"
+    initial: false
+    
+  # Pump outputs
+  - name: "pump1_run"
+    type: "bool"
+    initial: false
+  - name: "pump2_run"
+    type: "bool"
+    initial: false
+  - name: "pump3_run"
+    type: "bool"
+    initial: false
+  - name: "pump4_run"
+    type: "bool"
+    initial: false
+  - name: "pump5_run"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "pressure_low"
+    type: "bool"
+    initial: false
+  - name: "pressure_ok"
+    type: "bool"
+    initial: false
+  - name: "start_trigger"
+    type: "bool"
+    initial: false
+  - name: "stop_trigger"
+    type: "bool"
+    initial: false
+  - name: "pump_index"
+    type: "int"
+    initial: 0
+  - name: "pump_running"
+    type: "bool"
+    initial: false
+  - name: "auto_mode"
+    type: "bool"
+    initial: true
+
+blocks:
+  # Pressure monitoring
+  - name: "low_pressure_detect"
+    type: "LT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_start_sp"
+    outputs:
+      out: "pressure_low"
+      
+  - name: "pressure_ok_detect"
+    type: "GT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_stop_sp"
+    outputs:
+      out: "pressure_ok"
+      
+  # Edge detection for pump control
+  - name: "start_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_low"
+    outputs:
+      q: "start_trigger"
+      
+  - name: "stop_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_ok"
+    outputs:
+      q: "stop_trigger"
+      
+  # Pump sequencer - rotates on each start
+  - name: "pump_selector"
+    type: "SEQUENCER"
+    inputs:
+      trigger: "start_trigger"
+      reset: "system_reset"
+    outputs:
+      index: "pump_index"
+    params:
+      max: 5
+      
+  # Pump run latch
+  - name: "pump_run_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_trigger"
+      reset: "stop_trigger"
+    outputs:
+      q: "pump_running"
+      
+  # Auto/Manual mode
+  - name: "manual_mode_not"
+    type: "NOT"
+    inputs:
+      in: "manual_override"
+    outputs:
+      out: "auto_mode"
+      
+  # Auto control enable
+  - name: "auto_control"
+    type: "AND"
+    inputs:
+      in1: "pump_running"
+      in2: "auto_mode"
+    outputs:
+      out: "auto_pump_enable"
+      
+  # Pump selection logic
+  - name: "pump1_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_0"
+    outputs:
+      out: "pump1_selected"
+      
+  - name: "pump2_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_1"
+    outputs:
+      out: "pump2_selected"
+      
+  - name: "pump3_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_2"
+    outputs:
+      out: "pump3_selected"
+      
+  - name: "pump4_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_3"
+    outputs:
+      out: "pump4_selected"
+      
+  - name: "pump5_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_4"
+    outputs:
+      out: "pump5_selected"
+      
+  # Final pump outputs
+  - name: "pump1_control"
+    type: "AND"
+    inputs:
+      in1: "pump1_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump1_run"
+      
+  - name: "pump2_control"
+    type: "AND"
+    inputs:
+      in1: "pump2_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump2_run"
+      
+  - name: "pump3_control"
+    type: "AND"
+    inputs:
+      in1: "pump3_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump3_run"
+      
+  - name: "pump4_control"
+    type: "AND"
+    inputs:
+      in1: "pump4_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump4_run"
+      
+  - name: "pump5_control"
+    type: "AND"
+    inputs:
+      in1: "pump5_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump5_run"
+      
+  # Constants for pump selection
+  - name: "const_0_block"
+    type: "CONST"
+    outputs:
+      out: "const_0"
+    params:
+      value: 0
+      
+  - name: "const_1_block"
+    type: "CONST"
+    outputs:
+      out: "const_1"
+    params:
+      value: 1
+      
+  - name: "const_2_block"
+    type: "CONST"
+    outputs:
+      out: "const_2"
+    params:
+      value: 2
+      
+  - name: "const_3_block"
+    type: "CONST"
+    outputs:
+      out: "const_3"
+    params:
+      value: 3
+      
+  - name: "const_4_block"
+    type: "CONST"
+    outputs:
+      out: "const_4"
+    params:
+      value: 4
+
+scan_time_ms: 100
+===== ./config/test_basic.yaml =====
+signals:
+  - name: "test_input"
+    type: "bool"
+    initial: false
+  - name: "test_output"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "simple_not"
+    type: "NOT"
+    inputs:
+      in: "test_input"
+    outputs:
+      out: "test_output"
+
+scan_time_ms: 100
+===== ./src/main.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use tracing::{info, error};
+use tracing_subscriber;
+use tokio::signal;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Initialize logging
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .init();
+    
+    info!("Soft-PLC starting...");
+    
+    // Get config file from command line or use default
+    let config_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "config/example_logic.yaml".to_string());
+    
+    info!("Loading configuration from: {}", config_path);
+    
+    // Create and start scan engine
+    let mut engine = ScanEngine::from_file(&config_path)?;
+    
+    // Clone signal bus for monitoring
+    let signal_bus = engine.signal_bus().clone();
+    
+    // Spawn monitoring task
+    let monitor_handle = tokio::spawn(async move {
+        let mut monitor_interval = tokio::time::interval(Duration::from_secs(1));
+        
+        loop {
+            monitor_interval.tick().await;
+            
+            // Print key signals
+            if let Ok(motor_run) = signal_bus.get("motor_run") {
+                info!("Motor status: {:?}", motor_run);
+            }
+            
+            if let Ok(timer_done) = signal_bus.get("timer_done") {
+                info!("Timer status: {:?}", timer_done);
+            }
+        }
+    });
+    
+    // Spawn engine task
+    let engine_handle = tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            error!("Engine error: {}", e);
+        }
+    });
+    
+    // Wait for Ctrl+C
+    info!("PLC running. Press Ctrl+C to stop...");
+    signal::ctrl_c().await?;
+    
+    info!("Shutdown signal received");
+    
+    // Stop tasks
+    monitor_handle.abort();
+    engine_handle.abort();
+    
+    info!("Soft-PLC stopped");
+    Ok(())
+}
+===== ./src/error.rs =====
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum PlcError {
+    #[error("Signal not found: {0}")]
+    SignalNotFound(String),
+    
+    #[error("Invalid signal type: expected {expected}, got {actual}")]
+    TypeMismatch { expected: String, actual: String },
+    
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+    
+    #[error("Block execution error: {0}")]
+    ExecutionError(String),
+    
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+    
+    #[error("YAML parsing error: {0}")]
+    YamlError(#[from] serde_yaml::Error),
+}
+
+pub type Result<T> = std::result::Result<T, PlcError>;
+===== ./src/examples/pump_monitor.rs =====
+use soft_plc::{engine::ScanEngine, signal::SignalValue};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> soft_plc::Result<()> {
+    let config_path = "config/pump_alternation.yaml";
+    let mut engine = ScanEngine::from_file(config_path)?;
+    
+    // Spawn engine task
+    let engine_handle = tokio::spawn(async move {
+        if let Err(e) = engine.run().await {
+            eprintln!("Engine error: {}", e);
+        }
+    });
+    
+    // Monitor in main task
+    let bus = engine.signal_bus().clone();
+    let mut monitor_interval = tokio::time::interval(Duration::from_secs(1));
+    
+    println!("=== Pump Alternation Monitor ===");
+    println!("Commands:");
+    println!("  Press 'p' to drop pressure");
+    println!("  Press 'r' to recover pressure");
+    println!("  Press 's' to reset system");
+    println!("  Press 'q' to quit\n");
+    
+    loop {
+        monitor_interval.tick().await;
+        
+        // Display status
+        print!("\x1B[2J\x1B[1;1H"); // Clear screen
+        println!("=== Pump Status ===");
+        
+        if let Ok(pressure) = bus.get("pressure") {
+            println!("Pressure: {:?}", pressure);
+        }
+        
+        if let Ok(index) = bus.get("pump_index") {
+            println!("Active Pump Index: {:?}", index);
+        }
+        
+        println!("\nPump States:");
+        for i in 1..=5 {
+            if let Ok(state) = bus.get(&format!("pump{}_run", i)) {
+                let status = match state {
+                    SignalValue::Bool(true) => "RUNNING",
+                    _ => "OFF"
+                };
+                println!("  Pump {}: {}", i, status);
+            }
+        }
+        
+        // Simple command handling (would need proper async stdin in production)
+        // This is just for demonstration
+    }
+    
+    engine_handle.abort();
+    Ok(())
+}
+===== ./src/blocks/traits.rs =====
+use crate::{Result, signal::SignalBus};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+pub trait Block: Send + Sync {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()>;
+    fn name(&self) -> &str;
+    fn block_type(&self) -> &str;
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlockConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub inputs: HashMap<String, String>,
+    pub outputs: HashMap<String, String>,
+    #[serde(default)]
+    pub params: HashMap<String, serde_yaml::Value>,
+}
+===== ./src/blocks/timers/ton.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer On Delay - output turns on after input has been true for preset time
+pub struct TON {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+}
+
+impl TON {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TON requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: false,
+        })
+    }
+}
+
+impl Block for TON {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        if current_input && !self.prev_input {
+            // Rising edge - start timing
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+        } else if !current_input {
+            // Input is false - reset
+            self.start_time = None;
+            self.elapsed_ms = 0;
+        } else if current_input && self.start_time.is_some() {
+            // Input remains true - update elapsed time
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs
+        let done = current_input && self.elapsed_ms >= self.preset_ms;
+        bus.set(&self.output, SignalValue::Bool(done))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TON"
+    }
+}
+===== ./src/blocks/timers/tof.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer Off Delay - output turns off after input has been false for preset time
+pub struct TOF {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+}
+
+impl TOF {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TOF requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: true,
+        })
+    }
+}
+
+impl Block for TOF {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        if !current_input && self.prev_input {
+            // Falling edge - start timing
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+        } else if current_input {
+            // Input is true - reset
+            self.start_time = None;
+            self.elapsed_ms = 0;
+        } else if !current_input && self.start_time.is_some() {
+            // Input remains false - update elapsed time
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs - output stays on until timer expires
+        let done = current_input || (self.elapsed_ms < self.preset_ms);
+        bus.set(&self.output, SignalValue::Bool(done))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TOF"
+    }
+}
+===== ./src/blocks/timers/tp.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// Timer Pulse - generates a pulse of preset duration on rising edge of input
+pub struct TP {
+    name: String,
+    input: String,
+    output: String,
+    elapsed_output: Option<String>,
+    preset_ms: u64,
+    start_time: Option<Instant>,
+    elapsed_ms: u64,
+    prev_input: bool,
+    pulse_active: bool,
+}
+
+impl TP {
+    pub fn new(
+        name: String, 
+        inputs: &HashMap<String, String>, 
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'q' output".to_string()))?
+            .clone();
+            
+        let elapsed_output = outputs.get("et").cloned();
+        
+        let preset_ms = params.get("preset_ms")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| crate::PlcError::ConfigError("TP requires 'preset_ms' parameter".to_string()))?;
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            elapsed_output,
+            preset_ms,
+            start_time: None,
+            elapsed_ms: 0,
+            prev_input: false,
+            pulse_active: false,
+        })
+    }
+}
+
+impl Block for TP {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current_input = bus.get_bool(&self.input)?;
+        
+        // Detect rising edge
+        if current_input && !self.prev_input && !self.pulse_active {
+            // Start pulse
+            self.start_time = Some(Instant::now());
+            self.elapsed_ms = 0;
+            self.pulse_active = true;
+        }
+        
+        // Update timing if pulse is active
+        if self.pulse_active && self.start_time.is_some() {
+            self.elapsed_ms = self.start_time.unwrap().elapsed().as_millis() as u64;
+            
+            // Check if pulse duration exceeded
+            if self.elapsed_ms >= self.preset_ms {
+                self.pulse_active = false;
+                self.start_time = None;
+            }
+        }
+        
+        self.prev_input = current_input;
+        
+        // Set outputs
+        bus.set(&self.output, SignalValue::Bool(self.pulse_active))?;
+        
+        if let Some(et_output) = &self.elapsed_output {
+            bus.set(et_output, SignalValue::Int(self.elapsed_ms as i32))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "TP"
+    }
+}
+===== ./src/blocks/timers/mod.rs =====
+mod ton;
+mod tof;
+mod tp;
+
+pub use ton::TON;
+pub use tof::TOF;
+pub use tp::TP;
+===== ./src/blocks/basic/const_block.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Constant value block - outputs a constant value
+pub struct ConstBlock {
+    name: String,
+    output: String,
+    value: SignalValue,
+}
+
+impl ConstBlock {
+    pub fn new(
+        name: String,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("CONST requires 'out' output".to_string()))?
+            .clone();
+            
+        let value_param = params.get("value")
+            .ok_or_else(|| crate::PlcError::ConfigError("CONST requires 'value' parameter".to_string()))?;
+            
+        // Determine value type from YAML
+        let value = if let Some(b) = value_param.as_bool() {
+            SignalValue::Bool(b)
+        } else if let Some(i) = value_param.as_i64() {
+            SignalValue::Int(i as i32)
+        } else if let Some(f) = value_param.as_f64() {
+            SignalValue::Float(f)
+        } else if let Some(s) = value_param.as_str() {
+            SignalValue::String(s.to_string())
+        } else {
+            return Err(crate::PlcError::ConfigError("CONST value must be bool, int, float, or string".to_string()));
+        };
+            
+        Ok(Self { name, output, value })
+    }
+}
+
+impl Block for ConstBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        bus.set(&self.output, self.value.clone())?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "CONST"
+    }
+}
+===== ./src/blocks/basic/comparison.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Equal comparison block
+pub struct EqBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl EqBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("EQ requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for EqBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Bool(a), SignalValue::Bool(b)) => a == b,
+            (SignalValue::Int(a), SignalValue::Int(b)) => a == b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => (a - b).abs() < f64::EPSILON,
+            (SignalValue::String(a), SignalValue::String(b)) => a == b,
+            _ => false,
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "EQ"
+    }
+}
+
+/// Greater than comparison block
+pub struct GtBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl GtBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("GT requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for GtBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Int(a), SignalValue::Int(b)) => a > b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => a > b,
+            _ => return Err(crate::PlcError::TypeMismatch {
+                expected: "numeric".to_string(),
+                actual: "non-numeric".to_string(),
+            }),
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "GT"
+    }
+}
+
+/// Less than comparison block
+pub struct LtBlock {
+    name: String,
+    input1: String,
+    input2: String,
+    output: String,
+}
+
+impl LtBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input1 = inputs.get("in1")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'in1' input".to_string()))?
+            .clone();
+            
+        let input2 = inputs.get("in2")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'in2' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("LT requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input1, input2, output })
+    }
+}
+
+impl Block for LtBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let val1 = bus.get(&self.input1)?;
+        let val2 = bus.get(&self.input2)?;
+        
+        let result = match (&val1, &val2) {
+            (SignalValue::Int(a), SignalValue::Int(b)) => a < b,
+            (SignalValue::Float(a), SignalValue::Float(b)) => a < b,
+            _ => return Err(crate::PlcError::TypeMismatch {
+                expected: "numeric".to_string(),
+                actual: "non-numeric".to_string(),
+            }),
+        };
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "LT"
+    }
+}
+===== ./src/blocks/basic/logic.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+pub struct AndBlock {
+    name: String,
+    inputs: Vec<String>,
+    output: String,
+}
+
+impl AndBlock {
+    pub fn new(name: String, config: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let inputs: Vec<String> = config.iter()
+            .filter(|(k, _)| k.starts_with("in"))
+            .map(|(_, v)| v.clone())
+            .collect();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("AND block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, inputs, output })
+    }
+}
+
+impl Block for AndBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let mut result = true;
+        
+        for input in &self.inputs {
+            result = result && bus.get_bool(input)?;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "AND"
+    }
+}
+
+pub struct OrBlock {
+    name: String,
+    inputs: Vec<String>,
+    output: String,
+}
+
+impl OrBlock {
+    pub fn new(name: String, config: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let inputs: Vec<String> = config.iter()
+            .filter(|(k, _)| k.starts_with("in"))
+            .map(|(_, v)| v.clone())
+            .collect();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("OR block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, inputs, output })
+    }
+}
+
+impl Block for OrBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let mut result = false;
+        
+        for input in &self.inputs {
+            result = result || bus.get_bool(input)?;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(result))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "OR"
+    }
+}
+
+pub struct NotBlock {
+    name: String,
+    input: String,
+    output: String,
+}
+
+impl NotBlock {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("in")
+            .ok_or_else(|| crate::PlcError::ConfigError("NOT block requires 'in' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("out")
+            .ok_or_else(|| crate::PlcError::ConfigError("NOT block requires 'out' output".to_string()))?
+            .clone();
+            
+        Ok(Self { name, input, output })
+    }
+}
+
+impl Block for NotBlock {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let value = bus.get_bool(&self.input)?;
+        bus.set(&self.output, SignalValue::Bool(!value))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "NOT"
+    }
+}
+===== ./src/blocks/basic/mod.rs =====
+mod logic;
+mod comparison;
+mod const_block;
+
+pub use logic::{AndBlock, OrBlock, NotBlock};
+pub use comparison::{EqBlock, GtBlock, LtBlock};
+pub use const_block::ConstBlock;mod logic;
+mod comparison;
+
+pub use logic::{AndBlock, OrBlock, NotBlock};
+pub use comparison::{EqBlock, GtBlock, LtBlock};
+===== ./src/blocks/triggers/f_trig.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Falling edge trigger - outputs true for one scan when input transitions from true to false
+pub struct FTrig {
+    name: String,
+    input: String,
+    output: String,
+    prev_state: bool,
+}
+
+impl FTrig {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("clk")
+            .ok_or_else(|| crate::PlcError::ConfigError("F_TRIG requires 'clk' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("F_TRIG requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            prev_state: false,
+        })
+    }
+}
+
+impl Block for FTrig {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current = bus.get_bool(&self.input)?;
+        let falling_edge = !current && self.prev_state;
+        self.prev_state = current;
+        
+        bus.set(&self.output, SignalValue::Bool(falling_edge))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "F_TRIG"
+    }
+}
+===== ./src/blocks/triggers/sr_latch.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+pub struct SRLatch {
+    name: String,
+    set_input: String,
+    reset_input: String,
+    output: String,
+    state: bool,
+}
+
+impl SRLatch {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let set_input = inputs.get("set")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'set' input".to_string()))?
+            .clone();
+            
+        let reset_input = inputs.get("reset")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'reset' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("SR_LATCH requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            set_input,
+            reset_input,
+            output,
+            state: false,
+        })
+    }
+}
+
+impl Block for SRLatch {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let set = bus.get_bool(&self.set_input)?;
+        let reset = bus.get_bool(&self.reset_input)?;
+        
+        // Reset has priority
+        if reset {
+            self.state = false;
+        } else if set {
+            self.state = true;
+        }
+        
+        bus.set(&self.output, SignalValue::Bool(self.state))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "SR_LATCH"
+    }
+}
+===== ./src/blocks/triggers/r_trig.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Rising edge trigger - outputs true for one scan when input transitions from false to true
+pub struct RTrig {
+    name: String,
+    input: String,
+    output: String,
+    prev_state: bool,
+}
+
+impl RTrig {
+    pub fn new(name: String, inputs: &HashMap<String, String>, outputs: &HashMap<String, String>) -> Result<Self> {
+        let input = inputs.get("clk")
+            .ok_or_else(|| crate::PlcError::ConfigError("R_TRIG requires 'clk' input".to_string()))?
+            .clone();
+            
+        let output = outputs.get("q")
+            .ok_or_else(|| crate::PlcError::ConfigError("R_TRIG requires 'q' output".to_string()))?
+            .clone();
+            
+        Ok(Self {
+            name,
+            input,
+            output,
+            prev_state: false,
+        })
+    }
+}
+
+impl Block for RTrig {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        let current = bus.get_bool(&self.input)?;
+        let rising_edge = current && !self.prev_state;
+        self.prev_state = current;
+        
+        bus.set(&self.output, SignalValue::Bool(rising_edge))?;
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "R_TRIG"
+    }
+}
+===== ./src/blocks/triggers/mod.rs =====
+mod r_trig;
+mod f_trig;
+mod sr_latch;
+
+pub use r_trig::RTrig;
+pub use f_trig::FTrig;
+pub use sr_latch::SRLatch;
+===== ./src/blocks/mod.rs =====
+pub mod traits;
+pub mod basic;
+pub mod timers;
+pub mod triggers;
+pub mod counters;
+
+use crate::{Result, PlcError};
+use traits::{Block, BlockConfig};
+
+// Re-export commonly used items
+pub use traits::Block as BlockTrait;
+pub use traits::BlockConfig;
+
+/// Factory function to create blocks from configuration
+pub fn create_block(config: &BlockConfig) -> Result<Box<dyn Block>> {
+    match config.block_type.as_str() {
+        // Logic blocks
+        "AND" => Ok(Box::new(basic::AndBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "OR" => Ok(Box::new(basic::OrBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "NOT" => Ok(Box::new(basic::NotBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Comparison blocks
+        "EQ" => Ok(Box::new(basic::EqBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "GT" => Ok(Box::new(basic::GtBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "LT" => Ok(Box::new(basic::LtBlock::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Trigger blocks
+        "R_TRIG" => Ok(Box::new(triggers::RTrig::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "F_TRIG" => Ok(Box::new(triggers::FTrig::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        "SR_LATCH" => Ok(Box::new(triggers::SRLatch::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+        )?)),
+        
+        // Timer blocks
+        "TON" => Ok(Box::new(timers::TON::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        "TOF" => Ok(Box::new(timers::TOF::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        "TP" => Ok(Box::new(timers::TP::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        // Counter blocks
+        "COUNTER" => Ok(Box::new(counters::Counter::new(
+            config.name.clone(),
+            &config.inputs,
+            &config.outputs,
+            &config.params,
+        )?)),
+        
+        _ => Err(PlcError::ConfigError(format!(
+            "Unknown block type: {}",
+            config.block_type
+        ))),
+    }
+}
+===== ./src/blocks/counters/counter.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Up/Down Counter with preset value
+pub struct Counter {
+    name: String,
+    count_up: String,
+    count_down: String,
+    reset: String,
+    preset_input: Option<String>,
+    output: String,
+    done_output: Option<String>,
+    preset: i32,
+    count: i32,
+    prev_up: bool,
+    prev_down: bool,
+}
+
+impl Counter {
+    pub fn new(
+        name: String,
+        inputs: &HashMap<String, String>,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let count_up = inputs.get("cu")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cu' input".to_string()))?
+            .clone();
+            
+        let count_down = inputs.get("cd")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cd' input".to_string()))?
+            .clone();
+            
+        let reset = inputs.get("r")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'r' input".to_string()))?
+            .clone();
+            
+        let preset_input = inputs.get("pv").cloned();
+        
+        let output = outputs.get("cv")
+            .ok_or_else(|| crate::PlcError::ConfigError("COUNTER requires 'cv' output".to_string()))?
+            .clone();
+            
+        let done_output = outputs.get("q").cloned();
+        
+        let preset = params.get("preset")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .unwrap_or(0);
+            
+        Ok(Self {
+            name,
+            count_up,
+            count_down,
+            reset,
+            preset_input,
+            output,
+            done_output,
+            preset,
+            count: 0,
+            prev_up: false,
+            prev_down: false,
+        })
+    }
+}
+
+impl Block for Counter {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        // Check reset first
+        if bus.get_bool(&self.reset)? {
+            self.count = 0;
+        } else {
+            // Get current preset value if input is connected
+            if let Some(pv) = &self.preset_input {
+                if let Ok(preset_value) = bus.get_int(pv) {
+                    self.preset = preset_value;
+                }
+            }
+            
+            // Check for count up edge
+            let current_up = bus.get_bool(&self.count_up)?;
+            if current_up && !self.prev_up {
+                self.count += 1;
+            }
+            self.prev_up = current_up;
+            
+            // Check for count down edge
+            let current_down = bus.get_bool(&self.count_down)?;
+            if current_down && !self.prev_down {
+                self.count -= 1;
+            }
+            self.prev_down = current_down;
+        }
+        
+        // Set outputs
+        bus.set(&self.output, SignalValue::Int(self.count))?;
+        
+        if let Some(done) = &self.done_output {
+            bus.set(done, SignalValue::Bool(self.count >= self.preset))?;
+        }
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "COUNTER"
+    }
+}
+===== ./src/blocks/counters/mod.rs =====
+mod counter;
+mod sequencer;
+
+pub use counter::Counter;
+pub use sequencer::Sequencer;
+===== ./src/blocks/counters/sequencer.rs =====
+use crate::{Result, signal::{SignalBus, SignalValue}};
+use crate::blocks::traits::Block;
+use std::collections::HashMap;
+
+/// Sequencer - Simple incrementing counter with wrap-around
+/// Increments on rising edge of trigger, wraps at max value
+/// Perfect for rotating equipment, pump alternation, etc.
+pub struct Sequencer {
+    name: String,
+    trigger: String,
+    reset: String,
+    index_output: String,
+    max: i32,
+    current_index: i32,
+    prev_trigger: bool,
+}
+
+impl Sequencer {
+    pub fn new(
+        name: String,
+        inputs: &HashMap<String, String>,
+        outputs: &HashMap<String, String>,
+        params: &HashMap<String, serde_yaml::Value>
+    ) -> Result<Self> {
+        let trigger = inputs.get("trigger")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'trigger' input".to_string()))?
+            .clone();
+            
+        let reset = inputs.get("reset")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'reset' input".to_string()))?
+            .clone();
+            
+        let index_output = outputs.get("index")
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'index' output".to_string()))?
+            .clone();
+            
+        let max = params.get("max")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32)
+            .ok_or_else(|| crate::PlcError::ConfigError("SEQUENCER requires 'max' parameter".to_string()))?;
+            
+        if max <= 0 {
+            return Err(crate::PlcError::ConfigError("SEQUENCER 'max' must be positive".to_string()));
+        }
+            
+        Ok(Self {
+            name,
+            trigger,
+            reset,
+            index_output,
+            max,
+            current_index: 0,
+            prev_trigger: false,
+        })
+    }
+}
+
+impl Block for Sequencer {
+    fn execute(&mut self, bus: &SignalBus) -> Result<()> {
+        // Check reset first (highest priority)
+        if bus.get_bool(&self.reset)? {
+            self.current_index = 0;
+            self.prev_trigger = false;
+        } else {
+            // Check for rising edge on trigger
+            let current_trigger = bus.get_bool(&self.trigger)?;
+            
+            if current_trigger && !self.prev_trigger {
+                // Increment and wrap
+                self.current_index = (self.current_index + 1) % self.max;
+            }
+            
+            self.prev_trigger = current_trigger;
+        }
+        
+        // Always output current index
+        bus.set(&self.index_output, SignalValue::Int(self.current_index))?;
+        
+        Ok(())
+    }
+    
+    fn name(&self) -> &str {
+        &self.name
+    }
+    
+    fn block_type(&self) -> &str {
+        "SEQUENCER"
+    }
+}
+===== ./src/lib.rs =====
+pub mod signal;
+pub mod blocks;
+pub mod engine;
+pub mod error;
+
+pub use error::{PlcError, Result};
+===== ./src/signal/bus.rs =====
+use dashmap::DashMap;
+use std::sync::Arc;
+use crate::{PlcError, Result};
+use super::SignalValue;
+
+#[derive(Clone)]
+pub struct SignalBus {
+    signals: Arc<DashMap<String, SignalValue>>,
+}
+
+impl SignalBus {
+    pub fn new() -> Self {
+        Self {
+            signals: Arc::new(DashMap::new()),
+        }
+    }
+    
+    pub fn set(&self, name: &str, value: SignalValue) -> Result<()> {
+        self.signals.insert(name.to_string(), value);
+        Ok(())
+    }
+    
+    pub fn get(&self, name: &str) -> Result<SignalValue> {
+        self.signals
+            .get(name)
+            .map(|entry| entry.value().clone())
+            .ok_or_else(|| PlcError::SignalNotFound(name.to_string()))
+    }
+    
+    pub fn get_bool(&self, name: &str) -> Result<bool> {
+        let value = self.get(name)?;
+        value.as_bool()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "bool".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn get_int(&self, name: &str) -> Result<i32> {
+        let value = self.get(name)?;
+        value.as_int()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "int".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn get_float(&self, name: &str) -> Result<f64> {
+        let value = self.get(name)?;
+        value.as_float()
+            .ok_or_else(|| PlcError::TypeMismatch {
+                expected: "float".to_string(),
+                actual: value.type_name().to_string(),
+            })
+    }
+    
+    pub fn exists(&self, name: &str) -> bool {
+        self.signals.contains_key(name)
+    }
+    
+    pub fn clear(&self) {
+        self.signals.clear();
+    }
+    
+    pub fn iter(&self) -> impl Iterator<Item = (String, SignalValue)> {
+        self.signals.iter().map(|entry| (entry.key().clone(), entry.value().clone()))
+    }
+}
+===== ./src/signal/value.rs =====
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SignalValue {
+    Bool(bool),
+    Int(i32),
+    Float(f64),
+    String(String),
+}
+
+impl SignalValue {
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            SignalValue::Bool(b) => Some(*b),
+            SignalValue::Int(i) => Some(*i != 0),
+            _ => None,
+        }
+    }
+    
+    pub fn as_int(&self) -> Option<i32> {
+        match self {
+            SignalValue::Int(i) => Some(*i),
+            SignalValue::Bool(b) => Some(if *b { 1 } else { 0 }),
+            SignalValue::Float(f) => Some(*f as i32),
+            _ => None,
+        }
+    }
+    
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            SignalValue::Float(f) => Some(*f),
+            SignalValue::Int(i) => Some(*i as f64),
+            _ => None,
+        }
+    }
+    
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            SignalValue::Bool(_) => "bool",
+            SignalValue::Int(_) => "int",
+            SignalValue::Float(_) => "float",
+            SignalValue::String(_) => "string",
+        }
+    }
+}
+===== ./src/signal/mod.rs =====
+mod value;
+mod bus;
+
+pub use value::SignalValue;
+pub use bus::SignalBus;
+===== ./src/bin/live_test.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use std::io::{self, Write};
+use tokio::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("=== Soft-PLC Live Test ===");
+    println!("Loading pump alternation example...\n");
+    
+    let mut engine = ScanEngine::from_file("config/pump_alternation.yaml")?;
+    let bus = engine.signal_bus().clone();
+    
+    // Start engine in background
+    let engine_handle = tokio::spawn(async move {
+        engine.run().await
+    });
+    
+    // Interactive control loop
+    let stdin = io::stdin();
+    let mut input = String::new();
+    
+    loop {
+        // Display status
+        println!("\n--- Current Status ---");
+        if let Ok(pressure) = bus.get("pressure") {
+            println!("Pressure: {:?}", pressure);
+        }
+        if let Ok(index) = bus.get("pump_index") {
+            println!("Pump Index: {:?}", index);
+        }
+        
+        // Show pump states
+        print!("Pumps: ");
+        for i in 1..=5 {
+            if let Ok(SignalValue::Bool(running)) = bus.get(&format!("pump{}_run", i)) {
+                if running {
+                    print!("[P{}:ON] ", i);
+                } else {
+                    print!("[P{}:--] ", i);
+                }
+            }
+        }
+        println!("\n");
+        
+        // Menu
+        println!("Commands:");
+        println!("  1 - Set pressure to 45 (trigger pump)");
+        println!("  2 - Set pressure to 65 (stop pump)");
+        println!("  3 - Toggle manual override");
+        println!("  4 - System reset");
+        println!("  5 - Show all signals");
+        println!("  q - Quit");
+        print!("\nChoice: ");
+        io::stdout().flush().unwrap();
+        
+        input.clear();
+        stdin.read_line(&mut input).unwrap();
+        
+        match input.trim() {
+            "1" => {
+                bus.set("pressure", SignalValue::Float(45.0))?;
+                println!("→ Pressure set to 45.0");
+            }
+            "2" => {
+                bus.set("pressure", SignalValue::Float(65.0))?;
+                println!("→ Pressure set to 65.0");
+            }
+            "3" => {
+                let current = bus.get_bool("manual_override").unwrap_or(false);
+                bus.set("manual_override", SignalValue::Bool(!current))?;
+                println!("→ Manual override: {}", !current);
+            }
+            "4" => {
+                bus.set("system_reset", SignalValue::Bool(true))?;
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                bus.set("system_reset", SignalValue::Bool(false))?;
+                println!("→ System reset");
+            }
+            "5" => {
+                println!("\n=== All Signals ===");
+                let mut signals: Vec<_> = bus.iter().collect();
+                signals.sort_by(|a, b| a.0.cmp(&b.0));
+                for (name, value) in signals {
+                    println!("  {:<25} = {:?}", name, value);
+                }
+            }
+            "q" => break,
+            _ => println!("Invalid choice"),
+        }
+        
+        // Give engine time to process
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    
+    engine_handle.abort();
+    println!("\nShutting down...");
+    Ok(())
+}
+===== ./src/bin/test_runner.rs =====
+use soft_plc::{Result, engine::ScanEngine, signal::SignalValue};
+use tokio::time::{sleep, Duration};
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    println!("Starting Soft-PLC Test Runner...\n");
+    
+    // Test 1: Basic functionality
+    println!("Test 1: Basic NOT gate");
+    let mut engine = ScanEngine::from_file("config/test_basic.yaml")?;
+    let bus = engine.signal_bus();
+    
+    // Run one scan manually
+    for block in &mut engine.blocks {
+        block.execute(bus)?;
+    }
+    
+    // Check initial state
+    let output = bus.get_bool("test_output")?;
+    println!("  Input: false, Output: {} (expected: true)", output);
+    assert_eq!(output, true);
+    
+    // Change input
+    bus.set("test_input", SignalValue::Bool(true))?;
+    for block in &mut engine.blocks {
+        block.execute(bus)?;
+    }
+    
+    let output = bus.get_bool("test_output")?;
+    println!("  Input: true, Output: {} (expected: false)", output);
+    assert_eq!(output, false);
+    
+    println!("✓ Test 1 passed!\n");
+    
+    // Test 2: Timer functionality
+    println!("Test 2: Timer (TON) functionality");
+    test_timer().await?;
+    
+    // Test 3: Sequencer
+    println!("\nTest 3: Sequencer functionality");
+    test_sequencer()?;
+    
+    println!("\n✅ All tests passed!");
+    Ok(())
+}
+
+async fn test_timer() -> Result<()> {
+    let yaml = r#"
+signals:
+  - name: "timer_input"
+    type: "bool"
+    initial: false
+  - name: "timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "test_timer"
+    type: "TON"
+    inputs:
+      in: "timer_input"
+    outputs:
+      q: "timer_done"
+    params:
+      preset_ms: 200
+      
+scan_time_ms: 50
+"#;
+
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml)?;
+    let mut engine = ScanEngine::new(config)?;
+    let bus = engine.signal_bus();
+    
+    // Start timer
+    bus.set("timer_input", SignalValue::Bool(true))?;
+    
+    // Run scans for 100ms (timer not done)
+    for _ in 0..2 {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    
+    let done = bus.get_bool("timer_done")?;
+    println!("  After 100ms: timer_done = {} (expected: false)", done);
+    assert_eq!(done, false);
+    
+    // Run scans for another 150ms (timer should complete)
+    for _ in 0..3 {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    
+    let done = bus.get_bool("timer_done")?;
+    println!("  After 250ms: timer_done = {} (expected: true)", done);
+    assert_eq!(done, true);
+    
+    println!("✓ Test 2 passed!");
+    Ok(())
+}
+
+fn test_sequencer() -> Result<()> {
+    let yaml = r#"
+signals:
+  - name: "trigger"
+    type: "bool"
+    initial: false
+  - name: "reset"
+    type: "bool" 
+    initial: false
+  - name: "index"
+    type: "int"
+    initial: 0
+
+blocks:
+  - name: "test_seq"
+    type: "SEQUENCER"
+    inputs:
+      trigger: "trigger"
+      reset: "reset"
+    outputs:
+      index: "index"
+    params:
+      max: 3
+"#;
+
+    let config = soft_plc::engine::PlcConfig::from_yaml(yaml)?;
+    let mut engine = ScanEngine::new(config)?;
+    let bus = engine.signal_bus();
+    
+    // Helper to run one scan
+    let mut run_scan = || -> Result<()> {
+        for block in &mut engine.blocks {
+            block.execute(bus)?;
+        }
+        Ok(())
+    };
+    
+    // Initial state
+    run_scan()?;
+    assert_eq!(bus.get_int("index")?, 0);
+    println!("  Initial index: 0");
+    
+    // Trigger sequence
+    for expected in 1..6 {
+        // Rising edge
+        bus.set("trigger", SignalValue::Bool(true))?;
+        run_scan()?;
+        
+        // Falling edge
+        bus.set("trigger", SignalValue::Bool(false))?;
+        run_scan()?;
+        
+        let index = bus.get_int("index")?;
+        let expected_wrapped = expected % 3;
+        println!("  After trigger {}: index = {} (expected: {})", 
+                 expected, index, expected_wrapped);
+        assert_eq!(index, expected_wrapped);
+    }
+    
+    // Test reset
+    bus.set("reset", SignalValue::Bool(true))?;
+    run_scan()?;
+    let index = bus.get_int("index")?;
+    println!("  After reset: index = {} (expected: 0)", index);
+    assert_eq!(index, 0);
+    
+    println!("✓ Test 3 passed!");
+    Ok(())
+}
+===== ./src/engine/scan.rs =====
+use crate::{Result, PlcError, signal::SignalBus, blocks};
+use crate::engine::config::PlcConfig;
+use tokio::time::{interval, Duration};
+use tracing::{info, error, debug};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct ScanEngine {
+    config: PlcConfig,
+    signal_bus: SignalBus,
+    blocks: Vec<Box<dyn blocks::BlockTrait>>,
+    running: Arc<RwLock<bool>>,
+    scan_count: u64,
+}
+
+impl ScanEngine {
+    pub fn new(config: PlcConfig) -> Result<Self> {
+        let signal_bus = SignalBus::new();
+        
+        // Initialize signals
+        for signal_config in &config.signals {
+            let initial_value = signal_config.to_signal_value()?;
+            signal_bus.set(&signal_config.name, initial_value)?;
+            debug!("Initialized signal '{}' with type '{}'", 
+                signal_config.name, signal_config.signal_type);
+        }
+        
+        // Create blocks
+        let mut blocks = Vec::new();
+        for block_config in &config.blocks {
+            let block = blocks::create_block(block_config)?;
+            info!("Created block '{}' of type '{}'", 
+                block_config.name, block_config.block_type);
+            blocks.push(block);
+        }
+        
+        Ok(Self {
+            config,
+            signal_bus,
+            blocks,
+            running: Arc::new(RwLock::new(false)),
+            scan_count: 0,
+        })
+    }
+    
+    pub fn from_file(config_path: &str) -> Result<Self> {
+        let config = PlcConfig::from_file(config_path)?;
+        Self::new(config)
+    }
+    
+    pub fn signal_bus(&self) -> &SignalBus {
+        &self.signal_bus
+    }
+    
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Starting scan engine with {}ms scan time", self.config.scan_time_ms);
+        
+        {
+            let mut running = self.running.write().await;
+            *running = true;
+        }
+        
+        let mut scan_interval = interval(Duration::from_millis(self.config.scan_time_ms));
+        
+        while *self.running.read().await {
+            scan_interval.tick().await;
+            
+            let scan_start = std::time::Instant::now();
+            
+            // Execute all blocks in order
+            for block in &mut self.blocks {
+                if let Err(e) = block.execute(&self.signal_bus) {
+                    error!("Error executing block '{}': {}", block.name(), e);
+                    // Continue with other blocks even if one fails
+                }
+            }
+            
+            self.scan_count += 1;
+            let scan_duration = scan_start.elapsed();
+            
+            if scan_duration.as_millis() > self.config.scan_time_ms as u128 {
+                error!("Scan overrun: {}ms > {}ms", 
+                    scan_duration.as_millis(), self.config.scan_time_ms);
+            } else {
+                debug!("Scan {} completed in {:?}", self.scan_count, scan_duration);
+            }
+        }
+        
+        info!("Scan engine stopped after {} scans", self.scan_count);
+        Ok(())
+    }
+    
+    pub async fn stop(&self) {
+        info!("Stopping scan engine...");
+        let mut running = self.running.write().await;
+        *running = false;
+    }
+    
+    pub fn is_running(&self) -> bool {
+        // Try to read without blocking
+        self.running.try_read().map(|r| *r).unwrap_or(false)
+    }
+    
+    pub fn scan_count(&self) -> u64 {
+        self.scan_count
+    }
+    
+    pub fn dump_signals(&self) -> Vec<(String, SignalValue)> {
+        self.signal_bus.iter().collect()
+    }
+}
+===== ./src/engine/config.rs =====
+use serde::{Deserialize, Serialize};
+use crate::{Result, PlcError, signal::SignalValue};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalConfig {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub signal_type: String,
+    #[serde(default)]
+    pub initial: serde_yaml::Value,
+}
+
+impl SignalConfig {
+    pub fn to_signal_value(&self) -> Result<SignalValue> {
+        match self.signal_type.as_str() {
+            "bool" => {
+                let val = self.initial.as_bool().unwrap_or(false);
+                Ok(SignalValue::Bool(val))
+            }
+            "int" => {
+                let val = self.initial.as_i64().unwrap_or(0) as i32;
+                Ok(SignalValue::Int(val))
+            }
+            "float" => {
+                let val = self.initial.as_f64().unwrap_or(0.0);
+                Ok(SignalValue::Float(val))
+            }
+            "string" => {
+                let val = self.initial.as_str().unwrap_or("").to_string();
+                Ok(SignalValue::String(val))
+            }
+            _ => Err(PlcError::ConfigError(format!(
+                "Unknown signal type: {}",
+                self.signal_type
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlcConfig {
+    #[serde(default)]
+    pub signals: Vec<SignalConfig>,
+    #[serde(default)]
+    pub blocks: Vec<crate::blocks::BlockConfig>,
+    #[serde(default)]
+    pub scan_time_ms: u64,
+}
+
+impl Default for PlcConfig {
+    fn default() -> Self {
+        Self {
+            signals: Vec::new(),
+            blocks: Vec::new(),
+            scan_time_ms: 100, // Default 100ms scan time
+        }
+    }
+}
+
+impl PlcConfig {
+    pub fn from_yaml(yaml_str: &str) -> Result<Self> {
+        serde_yaml::from_str(yaml_str)
+            .map_err(|e| PlcError::YamlError(e))
+    }
+    
+    pub fn from_file(path: &str) -> Result<Self> {
+        let contents = std::fs::read_to_string(path)?;
+        Self::from_yaml(&contents)
+    }
+}
+
+// src/engine/scan.rs
+use crate::{Result, signal::SignalBus, blocks};
+use crate::engine::config::PlcConfig;
+use crate::signal::SignalValue;
+use tokio::time::{interval, Duration};
+use tracing::{info, error, debug};
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct ScanEngine {
+    config: PlcConfig,
+    signal_bus: SignalBus,
+    blocks: Vec<Box<dyn blocks::BlockTrait>>,
+    running: Arc<RwLock<bool>>,
+    scan_count: u64,
+}
+
+impl ScanEngine {
+    pub fn new(config: PlcConfig) -> Result<Self> {
+        let signal_bus = SignalBus::new();
+        
+        // Initialize signals
+        for signal_config in &config.signals {
+            let initial_value = signal_config.to_signal_value()?;
+            signal_bus.set(&signal_config.name, initial_value)?;
+            debug!("Initialized signal '{}' with type '{}'", 
+                signal_config.name, signal_config.signal_type);
+        }
+        
+        // Create blocks
+        let mut blocks = Vec::new();
+        for block_config in &config.blocks {
+            let block = blocks::create_block(block_config)?;
+            info!("Created block '{}' of type '{}'", 
+                block_config.name, block_config.block_type);
+            blocks.push(block);
+        }
+        
+        Ok(Self {
+            config,
+            signal_bus,
+            blocks,
+            running: Arc::new(RwLock::new(false)),
+            scan_count: 0,
+        })
+    }
+    
+    pub fn from_file(config_path: &str) -> Result<Self> {
+        let config = PlcConfig::from_file(config_path)?;
+        Self::new(config)
+    }
+    
+    pub fn signal_bus(&self) -> &SignalBus {
+        &self.signal_bus
+    }
+    
+    pub async fn run(&mut self) -> Result<()> {
+        info!("Starting scan engine with {}ms scan time", self.config.scan_time_ms);
+        
+        {
+            let mut running = self.running.write().await;
+            *running = true;
+        }
+        
+        let mut scan_interval = interval(Duration::from_millis(self.config.scan_time_ms));
+        
+        while *self.running.read().await {
+            scan_interval.tick().await;
+            
+            let scan_start = std::time::Instant::now();
+            
+            // Execute all blocks in order
+            for block in &mut self.blocks {
+                if let Err(e) = block.execute(&self.signal_bus) {
+                    error!("Error executing block '{}': {}", block.name(), e);
+                    // Continue with other blocks even if one fails
+                }
+            }
+            
+            self.scan_count += 1;
+            let scan_duration = scan_start.elapsed();
+            
+            if scan_duration.as_millis() > self.config.scan_time_ms as u128 {
+                error!("Scan overrun: {}ms > {}ms", 
+                    scan_duration.as_millis(), self.config.scan_time_ms);
+            } else {
+                debug!("Scan {} completed in {:?}", self.scan_count, scan_duration);
+            }
+        }
+        
+        info!("Scan engine stopped after {} scans", self.scan_count);
+        Ok(())
+    }
+    
+    pub async fn stop(&self) {
+        info!("Stopping scan engine...");
+        let mut running = self.running.write().await;
+        *running = false;
+    }
+    
+    pub fn is_running(&self) -> bool {
+        // Try to read without blocking
+        self.running.try_read().map(|r| *r).unwrap_or(false)
+    }
+    
+    pub fn scan_count(&self) -> u64 {
+        self.scan_count
+    }
+    
+    pub fn dump_signals(&self) -> Vec<(String, SignalValue)> {
+        self.signal_bus.iter().collect()
+    }
+}
+===== ./src/engine/mod.rs =====
+mod config;
+mod scan;
+
+pub use config::{PlcConfig, SignalConfig};
+pub use scan::ScanEngine;

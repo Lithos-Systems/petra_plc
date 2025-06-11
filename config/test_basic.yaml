@@ -1,0 +1,17 @@
+signals:
+  - name: "test_input"
+    type: "bool"
+    initial: false
+  - name: "test_output"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "simple_not"
+    type: "NOT"
+    inputs:
+      in: "test_input"
+    outputs:
+      out: "test_output"
+
+scan_time_ms: 100

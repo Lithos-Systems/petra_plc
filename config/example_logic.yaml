@@ -1,0 +1,38 @@
+signals:
+  - name: "start_button"
+    type: "bool"
+    initial: false
+  - name: "stop_button"
+    type: "bool"
+    initial: false
+  - name: "motor_run"
+    type: "bool"
+    initial: false
+  - name: "timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "start_button"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "motor_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "stop_button"
+    outputs:
+      q: "motor_run"
+      
+  - name: "run_timer"
+    type: "TON"
+    inputs:
+      in: "motor_run"
+    outputs:
+      q: "timer_done"
+    params:
+      preset_ms: 5000

@@ -1,0 +1,254 @@
+# Example: 5-pump alternation based on pressure
+# Rotates through pumps each time pressure drops below setpoint
+
+signals:
+  # Process values
+  - name: "pressure"
+    type: "float"
+    initial: 55.0
+    
+  # Setpoints
+  - name: "pressure_start_sp"
+    type: "float"
+    initial: 50.0
+  - name: "pressure_stop_sp"
+    type: "float"
+    initial: 60.0
+    
+  # Control signals
+  - name: "system_reset"
+    type: "bool"
+    initial: false
+  - name: "manual_override"
+    type: "bool"
+    initial: false
+    
+  # Pump outputs
+  - name: "pump1_run"
+    type: "bool"
+    initial: false
+  - name: "pump2_run"
+    type: "bool"
+    initial: false
+  - name: "pump3_run"
+    type: "bool"
+    initial: false
+  - name: "pump4_run"
+    type: "bool"
+    initial: false
+  - name: "pump5_run"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "pressure_low"
+    type: "bool"
+    initial: false
+  - name: "pressure_ok"
+    type: "bool"
+    initial: false
+  - name: "start_trigger"
+    type: "bool"
+    initial: false
+  - name: "stop_trigger"
+    type: "bool"
+    initial: false
+  - name: "pump_index"
+    type: "int"
+    initial: 0
+  - name: "pump_running"
+    type: "bool"
+    initial: false
+  - name: "auto_mode"
+    type: "bool"
+    initial: true
+
+blocks:
+  # Pressure monitoring
+  - name: "low_pressure_detect"
+    type: "LT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_start_sp"
+    outputs:
+      out: "pressure_low"
+      
+  - name: "pressure_ok_detect"
+    type: "GT"
+    inputs:
+      in1: "pressure"
+      in2: "pressure_stop_sp"
+    outputs:
+      out: "pressure_ok"
+      
+  # Edge detection for pump control
+  - name: "start_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_low"
+    outputs:
+      q: "start_trigger"
+      
+  - name: "stop_edge_detect"
+    type: "R_TRIG"
+    inputs:
+      clk: "pressure_ok"
+    outputs:
+      q: "stop_trigger"
+      
+  # Pump sequencer - rotates on each start
+  - name: "pump_selector"
+    type: "SEQUENCER"
+    inputs:
+      trigger: "start_trigger"
+      reset: "system_reset"
+    outputs:
+      index: "pump_index"
+    params:
+      max: 5
+      
+  # Pump run latch
+  - name: "pump_run_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_trigger"
+      reset: "stop_trigger"
+    outputs:
+      q: "pump_running"
+      
+  # Auto/Manual mode
+  - name: "manual_mode_not"
+    type: "NOT"
+    inputs:
+      in: "manual_override"
+    outputs:
+      out: "auto_mode"
+      
+  # Auto control enable
+  - name: "auto_control"
+    type: "AND"
+    inputs:
+      in1: "pump_running"
+      in2: "auto_mode"
+    outputs:
+      out: "auto_pump_enable"
+      
+  # Pump selection logic
+  - name: "pump1_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_0"
+    outputs:
+      out: "pump1_selected"
+      
+  - name: "pump2_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_1"
+    outputs:
+      out: "pump2_selected"
+      
+  - name: "pump3_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_2"
+    outputs:
+      out: "pump3_selected"
+      
+  - name: "pump4_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_3"
+    outputs:
+      out: "pump4_selected"
+      
+  - name: "pump5_select"
+    type: "EQ"
+    inputs:
+      in1: "pump_index"
+      in2: "const_4"
+    outputs:
+      out: "pump5_selected"
+      
+  # Final pump outputs
+  - name: "pump1_control"
+    type: "AND"
+    inputs:
+      in1: "pump1_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump1_run"
+      
+  - name: "pump2_control"
+    type: "AND"
+    inputs:
+      in1: "pump2_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump2_run"
+      
+  - name: "pump3_control"
+    type: "AND"
+    inputs:
+      in1: "pump3_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump3_run"
+      
+  - name: "pump4_control"
+    type: "AND"
+    inputs:
+      in1: "pump4_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump4_run"
+      
+  - name: "pump5_control"
+    type: "AND"
+    inputs:
+      in1: "pump5_selected"
+      in2: "auto_pump_enable"
+    outputs:
+      out: "pump5_run"
+      
+  # Constants for pump selection
+  - name: "const_0_block"
+    type: "CONST"
+    outputs:
+      out: "const_0"
+    params:
+      value: 0
+      
+  - name: "const_1_block"
+    type: "CONST"
+    outputs:
+      out: "const_1"
+    params:
+      value: 1
+      
+  - name: "const_2_block"
+    type: "CONST"
+    outputs:
+      out: "const_2"
+    params:
+      value: 2
+      
+  - name: "const_3_block"
+    type: "CONST"
+    outputs:
+      out: "const_3"
+    params:
+      value: 3
+      
+  - name: "const_4_block"
+    type: "CONST"
+    outputs:
+      out: "const_4"
+    params:
+      value: 4
+
+scan_time_ms: 100

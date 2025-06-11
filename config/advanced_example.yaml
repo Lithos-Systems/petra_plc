@@ -1,0 +1,149 @@
+signals:
+  # Inputs
+  - name: "system_start"
+    type: "bool"
+    initial: false
+  - name: "system_stop"
+    type: "bool"
+    initial: false
+  - name: "emergency_stop"
+    type: "bool"
+    initial: false
+  - name: "part_detected"
+    type: "bool"
+    initial: false
+  - name: "conveyor_speed_setpoint"
+    type: "int"
+    initial: 50
+    
+  # Outputs
+  - name: "conveyor_run"
+    type: "bool"
+    initial: false
+  - name: "alarm_active"
+    type: "bool"
+    initial: false
+  - name: "part_count"
+    type: "int"
+    initial: 0
+  - name: "batch_complete"
+    type: "bool"
+    initial: false
+    
+  # Internal signals
+  - name: "system_enabled"
+    type: "bool"
+    initial: false
+  - name: "start_pulse"
+    type: "bool"
+    initial: false
+  - name: "part_edge"
+    type: "bool"
+    initial: false
+  - name: "alarm_timer_done"
+    type: "bool"
+    initial: false
+
+blocks:
+  # System control logic
+  - name: "start_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "system_start"
+    outputs:
+      q: "start_pulse"
+      
+  - name: "system_latch"
+    type: "SR_LATCH"
+    inputs:
+      set: "start_pulse"
+      reset: "system_stop"
+    outputs:
+      q: "system_enabled"
+      
+  - name: "emergency_check"
+    type: "NOT"
+    inputs:
+      in: "emergency_stop"
+    outputs:
+      out: "no_emergency"
+      
+  - name: "conveyor_control"
+    type: "AND"
+    inputs:
+      in1: "system_enabled"
+      in2: "no_emergency"
+    outputs:
+      out: "conveyor_run"
+      
+  # Part counting
+  - name: "part_trigger"
+    type: "R_TRIG"
+    inputs:
+      clk: "part_detected"
+    outputs:
+      q: "part_edge"
+      
+  - name: "part_counter"
+    type: "COUNTER"
+    inputs:
+      cu: "part_edge"
+      cd: "never_true"
+      r: "batch_complete"
+    outputs:
+      cv: "part_count"
+      q: "batch_complete"
+    params:
+      preset: 100
+      
+  # Alarm logic
+  - name: "alarm_condition"
+    type: "AND"
+    inputs:
+      in1: "emergency_stop"
+      in2: "system_enabled"
+    outputs:
+      out: "alarm_trigger"
+      
+  - name: "alarm_timer"
+    type: "TP"
+    inputs:
+      in: "alarm_trigger"
+    outputs:
+      q: "alarm_active"
+    params:
+      preset_ms: 500
+      
+  # Speed monitoring
+  - name: "speed_limit_check"
+    type: "GT"
+    inputs:
+      in1: "conveyor_speed_setpoint"
+      in2: "max_speed"
+    outputs:
+      out: "speed_too_high"
+      
+  - name: "speed_alarm"
+    type: "OR"
+    inputs:
+      in1: "alarm_active"
+      in2: "speed_too_high"
+    outputs:
+      out: "any_alarm"
+
+# Initialize some constants
+  - name: "const_max_speed"
+    type: "CONST"
+    outputs:
+      out: "max_speed"
+    params:
+      value: 100
+      
+  - name: "const_false"
+    type: "CONST"
+    outputs:
+      out: "never_true"
+    params:
+      value: false
+
+scan_time_ms: 50
