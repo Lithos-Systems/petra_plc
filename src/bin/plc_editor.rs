@@ -1,7 +1,7 @@
 use eframe::egui;
-use soft_plc::editor::{PlcEditorApp, PlcNodeTemplate};
+use soft_plc::editor::PlcEditorApp;
 
-fn main() -> Result<(), eframe::Error> {
+fn main() {
     let options = eframe::NativeOptions {
         initial_window_size: Some(egui::vec2(1400.0, 900.0)),
         ..Default::default()
@@ -11,5 +11,5 @@ fn main() -> Result<(), eframe::Error> {
         "Soft-PLC Visual Editor",
         options,
         Box::new(|cc| Box::new(PlcEditorApp::new(cc))),
-    )
+    );
 }
