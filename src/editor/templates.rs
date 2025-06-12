@@ -139,8 +139,8 @@ impl<'a> IntoIterator for &'a PlcNodeTemplates {
 impl egui_node_graph::NodeTemplateIter for PlcNodeTemplates {
     type Item = PlcNodeTemplate;
 
-    fn all_kinds(self) -> Vec<Self::Item> {
-        self.0
+    fn all_kinds(&self) -> Vec<Self::Item> {
+        self.0.clone()
     }
 }
 
